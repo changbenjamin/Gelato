@@ -85,7 +85,12 @@ final class KnowledgeBase {
 
             indexingProgress = "Embedding \(allTextsToEmbed.count) chunks..."
 
-            let embeddings = await embedInBatches(apiKey: apiKey, texts: allTextsToEmbed)
+            let result = await embedInBatches(apiKey: apiKey, texts: allTextsToEmbed)
+            let embeddings = result.embeddings
+
+            if embeddings == nil, let errMsg = result.error {
+                indexingProgress = "Embed error: \(errMsg)"
+            }
 
             if let embeddings {
                 var offset = 0
@@ -355,8 +360,8 @@ final class KnowledgeBase {
 
     // MARK: - Embedding Batches
 
-    private func embedInBatches(apiKey: String, texts: [String]) async -> [[Float]]? {
-        let batchSize = 128
+    private func embedInBatches(apiKey: String, texts: [String]) async -> (embeddings: [[Float]]?, error: String?) {
+        let batchSize = 32
         var allEmbeddings: [[Float]] = []
 
         for batchStart in stride(from: 0, to: texts.count, by: batchSize) {
@@ -378,17 +383,15 @@ final class KnowledgeBase {
                 } catch {
                     if !retried {
                         retried = true
-                        print("KB embed batch error (retrying): \(error)")
                         try? await Task.sleep(for: .seconds(1))
                         continue
                     }
-                    print("KB embed batch failed after retry: \(error)")
-                    return nil
+                    return (nil, error.localizedDescription)
                 }
             }
         }
 
-        return allEmbeddings
+        return (allEmbeddings, nil)
     }
 
     // MARK: - Vector Math

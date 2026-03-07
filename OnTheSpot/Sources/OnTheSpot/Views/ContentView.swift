@@ -81,15 +81,17 @@ struct ContentView: View {
         }
         .frame(minWidth: 280, maxWidth: 360, minHeight: 400)
         .background(.ultraThinMaterial)
-        .onAppear {
-            let kb = KnowledgeBase(settings: settings)
-            knowledgeBase = kb
-            transcriptionEngine = TranscriptionEngine(transcriptStore: transcriptStore)
-            suggestionEngine = SuggestionEngine(
-                transcriptStore: transcriptStore,
-                knowledgeBase: kb,
-                settings: settings
-            )
+        .task {
+            if knowledgeBase == nil {
+                let kb = KnowledgeBase(settings: settings)
+                knowledgeBase = kb
+                transcriptionEngine = TranscriptionEngine(transcriptStore: transcriptStore)
+                suggestionEngine = SuggestionEngine(
+                    transcriptStore: transcriptStore,
+                    knowledgeBase: kb,
+                    settings: settings
+                )
+            }
             indexKBIfNeeded()
         }
         .onChange(of: settings.kbFolderPath) {

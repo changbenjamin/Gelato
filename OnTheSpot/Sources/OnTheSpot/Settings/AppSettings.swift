@@ -24,6 +24,14 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(Int(inputDeviceID), forKey: "inputDeviceID") }
     }
 
+    var openRouterApiKey: String {
+        didSet { KeychainHelper.save(key: "openRouterApiKey", value: openRouterApiKey) }
+    }
+
+    var voyageApiKey: String {
+        didSet { KeychainHelper.save(key: "voyageApiKey", value: voyageApiKey) }
+    }
+
     /// When true, all app windows are invisible to screen sharing / recording.
     var hideFromScreenShare: Bool {
         didSet {
@@ -38,6 +46,8 @@ final class AppSettings {
         self.selectedModel = defaults.string(forKey: "selectedModel") ?? "anthropic/claude-sonnet-4"
         self.transcriptionLocale = defaults.string(forKey: "transcriptionLocale") ?? "en-US"
         self.inputDeviceID = AudioDeviceID(defaults.integer(forKey: "inputDeviceID"))
+        self.openRouterApiKey = KeychainHelper.load(key: "openRouterApiKey") ?? ""
+        self.voyageApiKey = KeychainHelper.load(key: "voyageApiKey") ?? ""
         // Default to true (hidden) if key has never been set
         if defaults.object(forKey: "hideFromScreenShare") == nil {
             self.hideFromScreenShare = true
@@ -52,18 +62,6 @@ final class AppSettings {
         for window in NSApp.windows {
             window.sharingType = type
         }
-    }
-
-    // MARK: - API Key (Keychain)
-
-    var openRouterApiKey: String {
-        get { KeychainHelper.load(key: "openRouterApiKey") ?? "" }
-        set { KeychainHelper.save(key: "openRouterApiKey", value: newValue) }
-    }
-
-    var voyageApiKey: String {
-        get { KeychainHelper.load(key: "voyageApiKey") ?? "" }
-        set { KeychainHelper.save(key: "voyageApiKey", value: newValue) }
     }
 
     var kbFolderURL: URL? {

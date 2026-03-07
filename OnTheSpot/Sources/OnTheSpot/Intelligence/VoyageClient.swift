@@ -97,7 +97,7 @@ actor VoyageClient {
         }
 
         if http.statusCode == 429, retryOn429 {
-            try await Task.sleep(for: .seconds(2))
+            try await Task.sleep(for: .seconds(20))
             return try await post(path: path, apiKey: apiKey, body: body, retryOn429: false)
         }
 
