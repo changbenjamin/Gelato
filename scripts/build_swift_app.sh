@@ -89,15 +89,17 @@ if [[ -n "${APPLE_ID:-}" && -n "${APPLE_TEAM_ID:-}" && -n "${APPLE_APP_PASSWORD:
   ZIP_PATH="$ROOT_DIR/dist/OpenGranola-notarize.zip"
   ditto -c -k --keepParent "$APP_DIR" "$ZIP_PATH"
 
-  xcrun notarytool submit "$ZIP_PATH" \
+  if xcrun notarytool submit "$ZIP_PATH" \
     --apple-id "$APPLE_ID" \
     --team-id "$APPLE_TEAM_ID" \
     --password "$APPLE_APP_PASSWORD" \
-    --wait
-
-  xcrun stapler staple "$APP_DIR"
+    --wait; then
+    xcrun stapler staple "$APP_DIR"
+    echo "Notarization complete"
+  else
+    echo "Warning: Notarization failed. App is signed but not notarized."
+  fi
   rm -f "$ZIP_PATH"
-  echo "Notarization complete"
 fi
 
 # Install to /Applications
