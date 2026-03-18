@@ -24,7 +24,7 @@ jobs:
         run: |
           TAG="${{ github.event.release.tag_name }}"
           VERSION="${TAG#v}"
-          PLIST="OpenGranola/Sources/OpenGranola/Info.plist"
+          PLIST="Gelato/Sources/Gelato/Info.plist"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$PLIST"
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST"
           echo "Set version to $VERSION"
@@ -93,15 +93,15 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: OpenGranola-dmg
-          path: dist/OpenGranola.dmg
+          name: Gelato-dmg
+          path: dist/Gelato.dmg
 
       - name: Attach DMG to Release
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload ${{ github.event.release.tag_name }} dist/OpenGranola.dmg --clobber
+          gh release upload ${{ github.event.release.tag_name }} dist/Gelato.dmg --clobber
 
       - name: Sign DMG and update appcast
         if: github.event_name == 'release'
@@ -111,10 +111,10 @@ jobs:
         run: |
           TAG="${{ github.event.release.tag_name }}"
           VERSION="${TAG#v}"
-          DMG_PATH="dist/OpenGranola.dmg"
+          DMG_PATH="dist/Gelato.dmg"
 
           # Extract sign_update from Sparkle build artifacts
-          SIGN_UPDATE=$(find OpenGranola/.build/artifacts/sparkle -name "sign_update" -type f 2>/dev/null | head -1)
+          SIGN_UPDATE=$(find Gelato/.build/artifacts/sparkle -name "sign_update" -type f 2>/dev/null | head -1)
           if [[ -z "$SIGN_UPDATE" ]]; then
             echo "Error: sign_update not found in Sparkle artifacts"
             exit 1
@@ -135,7 +135,7 @@ jobs:
           echo "EdDSA signature: $ED_SIGNATURE"
           echo "DMG length: $DMG_LENGTH"
 
-          DMG_URL="https://github.com/yazinsai/OpenGranola/releases/download/${TAG}/OpenGranola.dmg"
+          DMG_URL="https://github.com/yazinsai/OpenGranola/releases/download/${TAG}/Gelato.dmg"
           PUB_DATE=$(date -u +"%a, %d %b %Y %H:%M:%S %z")
 
           # Clone gh-pages branch
@@ -146,9 +146,9 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
             <channel>
-              <title>OpenGranola Updates</title>
+              <title>Gelato Updates</title>
               <link>https://raw.githubusercontent.com/yazinsai/OpenGranola/gh-pages/appcast.xml</link>
-              <description>Most recent updates to OpenGranola</description>
+              <description>Most recent updates to Gelato</description>
               <language>en</language>
               <item>
                 <title>Version ${VERSION}</title>

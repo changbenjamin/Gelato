@@ -4,7 +4,8 @@
       "Bash(swift --version)",
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebSearch",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(git mv OpenGranola/Sources/OpenGranola/App/OpenGranolaApp.swift OpenGranola/Sources/OpenGranola/App/GelatoApp.swift)"
     ]
   }
 }
