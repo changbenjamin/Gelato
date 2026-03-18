@@ -1,5 +1,47 @@
 import SwiftUI
 
+// MARK: - Shared tab enum & picker
+
+enum DetailTab: String, CaseIterable {
+    case notes = "Notes"
+    case transcript = "Transcript"
+}
+
+/// Rounded-capsule toggle picker matching the Cowork/Code style.
+struct DetailTabPicker: View {
+    @Binding var selection: DetailTab
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(DetailTab.allCases, id: \.self) { tab in
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        selection = tab
+                    }
+                } label: {
+                    Text(tab.rawValue)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(selection == tab ? .primary : .secondary)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 6)
+                        .background(
+                            Group {
+                                if selection == tab {
+                                    Capsule()
+                                        .fill(.background)
+                                        .shadow(color: .black.opacity(0.06), radius: 1, y: 1)
+                                }
+                            }
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(Capsule().fill(.quaternary.opacity(0.5)))
+    }
+}
+
 /// Detail panel showing the full transcript for a completed session with an editable title.
 struct SessionDetailView: View {
     let session: SessionSummary
@@ -10,6 +52,7 @@ struct SessionDetailView: View {
     @State private var titleSaveTask: Task<Void, Never>?
     @State private var utterances: [Utterance] = []
     @State private var isLoading = true
+    @State private var selectedTab: DetailTab = .notes
     @FocusState private var isTitleFocused: Bool
 
     var body: some View {
@@ -76,28 +119,42 @@ struct SessionDetailView: View {
             }
             .padding(.horizontal, 24)
             .padding(.top, 20)
-            .padding(.bottom, 16)
+            .padding(.bottom, 12)
+
+            // Tab picker
+            HStack {
+                DetailTabPicker(selection: $selectedTab)
+                Spacer()
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 12)
 
             Divider()
 
-            // Transcript
-            if isLoading {
-                Spacer()
-                ProgressView("Loading transcript...")
-                    .font(.system(size: 12))
-                Spacer()
-            } else if utterances.isEmpty {
-                Spacer()
-                Text("No transcript data")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.tertiary)
-                Spacer()
-            } else {
-                TranscriptView(
-                    utterances: utterances,
-                    volatileYouText: "",
-                    volatileThemText: ""
-                )
+            // Content based on selected tab
+            switch selectedTab {
+            case .notes:
+                NotesView(sessionID: session.id, library: library)
+
+            case .transcript:
+                if isLoading {
+                    Spacer()
+                    ProgressView("Loading transcript...")
+                        .font(.system(size: 12))
+                    Spacer()
+                } else if utterances.isEmpty {
+                    Spacer()
+                    Text("No transcript data")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                } else {
+                    TranscriptView(
+                        utterances: utterances,
+                        volatileYouText: "",
+                        volatileThemText: ""
+                    )
+                }
             }
         }
         .task {

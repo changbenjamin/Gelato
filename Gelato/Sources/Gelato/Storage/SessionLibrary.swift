@@ -83,6 +83,24 @@ actor SessionLibrary {
         try? SessionMetadataIO.write(metadata, to: metaURL)
     }
 
+    // MARK: - Notes
+
+    /// Load the notes text for a session (plain .notes.txt sidecar).
+    func loadNotes(for sessionID: String) -> String {
+        let notesURL = sessionsDirectory.appendingPathComponent("\(sessionID).notes.txt")
+        guard let data = try? Data(contentsOf: notesURL),
+              let text = String(data: data, encoding: .utf8) else {
+            return ""
+        }
+        return text
+    }
+
+    /// Save notes text for a session.
+    func saveNotes(for sessionID: String, text: String) {
+        let notesURL = sessionsDirectory.appendingPathComponent("\(sessionID).notes.txt")
+        try? text.write(to: notesURL, atomically: true, encoding: .utf8)
+    }
+
     /// Generate .meta.json for any existing .jsonl files that lack one (migration).
     /// Also re-generates metadata that is missing the wordCount field.
     func backfillMissingMetadata() {

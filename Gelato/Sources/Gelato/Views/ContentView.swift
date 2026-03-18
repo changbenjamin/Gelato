@@ -16,6 +16,7 @@ struct ContentView: View {
     @State private var selectedSession: SessionSummary?
     @State private var liveSessionTitle: String = ""
     @State private var sessionStartTime: Date?
+    @State private var liveSessionID: String?
 
     // Onboarding
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
@@ -41,6 +42,8 @@ struct ContentView: View {
                     settings: settings,
                     liveTitle: $liveSessionTitle,
                     audioLevel: audioLevel,
+                    sessionID: liveSessionID,
+                    library: sessionLibrary,
                     onStop: stopSession
                 )
             } else if let session = selectedSession {
@@ -135,6 +138,9 @@ struct ContentView: View {
 
         Task {
             await sessionStore.startSession()
+            if let url = await sessionStore.currentSessionURL {
+                liveSessionID = url.deletingPathExtension().lastPathComponent
+            }
             await transcriptLogger.startSession()
             await transcriptionEngine?.start(
                 locale: settings.locale,
@@ -179,6 +185,7 @@ struct ContentView: View {
         }
 
         sessionStartTime = nil
+        liveSessionID = nil
     }
 
     private func handleNewUtterance() {

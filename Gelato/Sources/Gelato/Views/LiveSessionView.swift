@@ -7,7 +7,11 @@ struct LiveSessionView: View {
     @Bindable var settings: AppSettings
     @Binding var liveTitle: String
     let audioLevel: Float
+    let sessionID: String?
+    let library: SessionLibrary
     let onStop: () -> Void
+
+    @State private var selectedTab: DetailTab = .transcript
 
     var body: some View {
         VStack(spacing: 0) {
@@ -47,16 +51,38 @@ struct LiveSessionView: View {
             }
             .padding(.horizontal, 24)
             .padding(.top, 20)
-            .padding(.bottom, 16)
+            .padding(.bottom, 12)
+
+            // Tab picker
+            HStack {
+                DetailTabPicker(selection: $selectedTab)
+                Spacer()
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 12)
 
             Divider()
 
-            // Live transcript
-            TranscriptView(
-                utterances: transcriptStore.utterances,
-                volatileYouText: transcriptStore.volatileYouText,
-                volatileThemText: transcriptStore.volatileThemText
-            )
+            // Content based on selected tab
+            switch selectedTab {
+            case .notes:
+                if let sessionID {
+                    NotesView(sessionID: sessionID, library: library)
+                } else {
+                    Spacer()
+                    Text("Notes will be available once recording begins...")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                }
+
+            case .transcript:
+                TranscriptView(
+                    utterances: transcriptStore.utterances,
+                    volatileYouText: transcriptStore.volatileYouText,
+                    volatileThemText: transcriptStore.volatileThemText
+                )
+            }
 
             Divider()
 
