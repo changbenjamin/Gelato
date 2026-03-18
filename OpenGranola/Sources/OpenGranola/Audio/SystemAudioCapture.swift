@@ -91,7 +91,7 @@ final class SystemAudioCapture: NSObject, @unchecked Sendable, SCStreamDelegate,
             diagLog("[SYS-RAW] #\(count) frames=\(frameCount) sr=\(asbd.mSampleRate) ch=\(asbd.mChannelsPerFrame) rms=\(rms)")
         }
 
-        _ = _sysContinuation.withLock { $0?.yield(pcmBuffer) }
+        _sysContinuation.withLock { _ = $0?.yield(pcmBuffer) }
     }
 
     // MARK: - SCStreamDelegate

@@ -3,7 +3,7 @@ import AppKit
 import Sparkle
 
 @main
-struct OpenGranolaApp: App {
+struct GelatoApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var settings = AppSettings()
     private let updaterController: SPUStandardUpdaterController
@@ -20,7 +20,7 @@ struct OpenGranolaApp: App {
                 }
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 320, height: 560)
+        .defaultSize(width: 900, height: 600)
         .commands {
             CommandGroup(after: .appInfo) {
                 CheckForUpdatesView(updater: updaterController.updater)

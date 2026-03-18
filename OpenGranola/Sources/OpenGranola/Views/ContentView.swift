@@ -1,87 +1,60 @@
 import SwiftUI
-import Combine
 
 struct ContentView: View {
     @Bindable var settings: AppSettings
+
+    // Transcription state
     @State private var transcriptStore = TranscriptStore()
-    @State private var knowledgeBase: KnowledgeBase?
     @State private var transcriptionEngine: TranscriptionEngine?
-    @State private var suggestionEngine: SuggestionEngine?
     @State private var sessionStore = SessionStore()
     @State private var transcriptLogger = TranscriptLogger()
-    @State private var overlayManager = OverlayManager()
-    @State private var lastThemUtteranceCount = 0
-    @AppStorage("isTranscriptExpanded") private var isTranscriptExpanded = true
-    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
-    @State private var showOnboarding = false
     @State private var audioLevel: Float = 0
 
+    // Session library state
+    @State private var sessionLibrary = SessionLibrary()
+    @State private var sessionListModel: SessionListModel?
+    @State private var selectedSession: SessionSummary?
+    @State private var liveSessionTitle: String = ""
+    @State private var sessionStartTime: Date?
+
+    // Onboarding
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
+    @State private var showOnboarding = false
+
     var body: some View {
-        VStack(spacing: 0) {
-            // Compact header
-            topBar
-
-            Divider()
-
-            // Main content: Suggestions
-            VStack(alignment: .leading, spacing: 0) {
-                sectionHeader("SUGGESTIONS")
-                SuggestionsView(
-                    suggestions: suggestionEngine?.suggestions ?? [],
-                    isGenerating: suggestionEngine?.isGenerating ?? false
-                )
-            }
-
-            Divider()
-
-            // Collapsible transcript
-            DisclosureGroup(isExpanded: $isTranscriptExpanded) {
-                TranscriptView(
-                    utterances: transcriptStore.utterances,
-                    volatileYouText: transcriptStore.volatileYouText,
-                    volatileThemText: transcriptStore.volatileThemText
-                )
-                .frame(height: 150)
-            } label: {
-                HStack(spacing: 6) {
-                    Text("Transcript")
-                        .font(.system(size: 12, weight: .medium))
-                    if !transcriptStore.utterances.isEmpty {
-                        Text("(\(transcriptStore.utterances.count))")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                    }
-                    Spacer()
-                    if isTranscriptExpanded && !transcriptStore.utterances.isEmpty {
-                        Button {
-                            copyTranscript()
-                        } label: {
-                            Image(systemName: "doc.on.doc")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Copy transcript")
-                    }
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-
-            Divider()
-
-            // Bottom bar: live indicator + model
-            ControlBar(
+        NavigationSplitView {
+            // Sidebar
+            SessionListView(
+                listModel: sessionListModel ?? SessionListModel(library: sessionLibrary),
+                selectedSession: $selectedSession,
                 isRunning: isRunning,
-                audioLevel: audioLevel,
-                selectedModel: settings.selectedModel,
-                statusMessage: transcriptionEngine?.assetStatus,
-                errorMessage: transcriptionEngine?.lastError,
-                onToggle: isRunning ? stopSession : startSession
+                liveTitle: liveSessionTitle,
+                liveWordCount: transcriptStore.utterances.reduce(0) { $0 + $1.text.split(separator: " ").count },
+                onStartSession: startSession
             )
+        } detail: {
+            // Detail panel
+            if isRunning {
+                LiveSessionView(
+                    transcriptStore: transcriptStore,
+                    transcriptionEngine: transcriptionEngine,
+                    settings: settings,
+                    liveTitle: $liveSessionTitle,
+                    audioLevel: audioLevel,
+                    onStop: stopSession
+                )
+            } else if let session = selectedSession {
+                SessionDetailView(
+                    session: session,
+                    library: sessionLibrary,
+                    listModel: sessionListModel ?? SessionListModel(library: sessionLibrary)
+                )
+                .id(session.id) // force recreate when selection changes
+            } else {
+                emptyDetailView
+            }
         }
-        .frame(minWidth: 280, maxWidth: 360, minHeight: 400)
-        .background(.ultraThinMaterial)
+        .frame(minWidth: 700, minHeight: 400)
         .overlay {
             if showOnboarding {
                 OnboardingView(isPresented: $showOnboarding)
@@ -97,23 +70,18 @@ struct ContentView: View {
             if !hasCompletedOnboarding {
                 showOnboarding = true
             }
-            if knowledgeBase == nil {
-                let kb = KnowledgeBase(settings: settings)
-                knowledgeBase = kb
+            if transcriptionEngine == nil {
                 transcriptionEngine = TranscriptionEngine(transcriptStore: transcriptStore)
-                suggestionEngine = SuggestionEngine(
-                    transcriptStore: transcriptStore,
-                    knowledgeBase: kb,
-                    settings: settings
-                )
             }
-            indexKBIfNeeded()
-        }
-        .onChange(of: settings.kbFolderPath) {
-            indexKBIfNeeded()
-        }
-        .onChange(of: settings.voyageApiKey) {
-            indexKBIfNeeded()
+            // Initialize session list
+            let model = SessionListModel(library: sessionLibrary)
+            sessionListModel = model
+            await sessionLibrary.backfillMissingMetadata()
+            await model.load()
+            // Auto-select first session
+            if let first = model.sessions.first {
+                selectedSession = first
+            }
         }
         .onChange(of: settings.inputDeviceID) {
             if isRunning {
@@ -122,10 +90,6 @@ struct ContentView: View {
         }
         .onChange(of: transcriptStore.utterances.count) {
             handleNewUtterance()
-        }
-        .onKeyPress(.escape) {
-            overlayManager.hide()
-            return .handled
         }
         .onReceive(Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()) { _ in
             guard let engine = transcriptionEngine else {
@@ -140,61 +104,35 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Top Bar
+    // MARK: - Empty Detail
 
-    private var topBar: some View {
-        HStack(spacing: 8) {
-            Text("OpenGranola")
-                .font(.system(size: 13, weight: .semibold))
-
-            Spacer()
-
-            // KB status
-            if let kb = knowledgeBase {
-                if !kb.indexingProgress.isEmpty {
-                    Text(kb.indexingProgress)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                } else if kb.isIndexed {
-                    HStack(spacing: 4) {
-                        Image(systemName: "folder")
-                            .font(.system(size: 10))
-                        Text("\(kb.fileCount) files")
-                            .font(.system(size: 11))
-                    }
-                    .foregroundStyle(.secondary)
-                }
-            }
-
-            Button("KB Folder...") {
-                chooseKBFolder()
-            }
-            .buttonStyle(.plain)
-            .font(.system(size: 11))
-            .foregroundStyle(Color.accentTeal)
+    private var emptyDetailView: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "waveform")
+                .font(.system(size: 40, weight: .light))
+                .foregroundStyle(.quaternary)
+            Text("Select a session")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.secondary)
+            Text("Or tap New Note to start recording.")
+                .font(.system(size: 13))
+                .foregroundStyle(.tertiary)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var isRunning: Bool {
         transcriptionEngine?.isRunning ?? false
     }
 
-    private func sectionHeader(_ title: String) -> some View {
-        Text(title)
-            .font(.system(size: 10, weight: .bold, design: .monospaced))
-            .foregroundStyle(.tertiary)
-            .tracking(1.5)
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
-            .padding(.bottom, 4)
-    }
-
     // MARK: - Actions
 
     private func startSession() {
+        liveSessionTitle = SessionMetadataIO.defaultTitle(for: Date())
+        sessionStartTime = Date()
+        transcriptStore.clear()
+        selectedSession = nil // detail panel will show live view since isRunning is true
+
         Task {
             await sessionStore.startSession()
             await transcriptLogger.startSession()
@@ -207,49 +145,40 @@ struct ContentView: View {
 
     private func stopSession() {
         transcriptionEngine?.stop()
+        let utteranceCount = transcriptStore.utterances.count
+        let wordCount = transcriptStore.utterances.reduce(0) { $0 + $1.text.split(separator: " ").count }
+        let duration: TimeInterval?
+        if let start = sessionStartTime {
+            duration = Date().timeIntervalSince(start)
+        } else {
+            duration = nil
+        }
+
         Task {
+            // Get session URL before ending (which clears it)
+            let sessionURL = await sessionStore.currentSessionURL
             await sessionStore.endSession()
             await transcriptLogger.endSession()
+
+            // Create metadata sidecar
+            if let url = sessionURL {
+                await sessionLibrary.createMetadata(
+                    for: url,
+                    title: liveSessionTitle,
+                    utteranceCount: utteranceCount,
+                    wordCount: wordCount,
+                    duration: duration
+                )
+            }
+
+            // Refresh list and auto-select the new session
+            await sessionListModel?.refresh()
+            if let first = sessionListModel?.sessions.first {
+                selectedSession = first
+            }
         }
-    }
 
-    private func toggleOverlay() {
-        let content = OverlayContent(
-            suggestions: suggestionEngine?.suggestions ?? [],
-            isGenerating: suggestionEngine?.isGenerating ?? false,
-            volatileThemText: transcriptStore.volatileThemText
-        )
-        overlayManager.toggle(content: content)
-    }
-
-    private func chooseKBFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.message = "Choose your knowledge base folder"
-
-        if panel.runModal() == .OK, let url = panel.url {
-            settings.kbFolderPath = url.path
-        }
-    }
-
-    private func indexKBIfNeeded() {
-        guard let url = settings.kbFolderURL, let kb = knowledgeBase else { return }
-        Task {
-            kb.clear()
-            await kb.index(folderURL: url)
-        }
-    }
-
-    private func copyTranscript() {
-        let timeFmt = DateFormatter()
-        timeFmt.dateFormat = "HH:mm:ss"
-        let lines = transcriptStore.utterances.map { u in
-            "[\(timeFmt.string(from: u.timestamp))] \(u.speaker == .you ? "You" : "Them"): \(u.text)"
-        }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
+        sessionStartTime = nil
     }
 
     private func handleNewUtterance() {
@@ -265,38 +194,13 @@ struct ContentView: View {
             )
         }
 
-        // Trigger suggestions on THEM utterance
-        if last.speaker == .them {
-            suggestionEngine?.onThemUtterance(last)
-
-            // Log session record with decision metadata (delayed to capture pipeline result)
-            Task { @MainActor in
-                // Small delay to let pipeline complete before logging
-                try? await Task.sleep(for: .seconds(5))
-                let decision = suggestionEngine?.lastDecision
-                let latestSuggestion = suggestionEngine?.suggestions.first
-                let record = SessionRecord(
-                    speaker: last.speaker,
-                    text: last.text,
-                    timestamp: last.timestamp,
-                    suggestions: latestSuggestion.map { [$0.text] },
-                    kbHits: latestSuggestion?.kbHits.map { $0.sourceFile },
-                    suggestionDecision: decision,
-                    surfacedSuggestionText: decision?.shouldSurface == true ? latestSuggestion?.text : nil,
-                    conversationStateSummary: transcriptStore.conversationState.shortSummary.isEmpty
-                        ? nil : transcriptStore.conversationState.shortSummary
-                )
-                await sessionStore.appendRecord(record)
-            }
-        } else {
-            // Log non-them utterances immediately
-            Task {
-                await sessionStore.appendRecord(SessionRecord(
-                    speaker: last.speaker,
-                    text: last.text,
-                    timestamp: last.timestamp
-                ))
-            }
+        // Log session record
+        Task {
+            await sessionStore.appendRecord(SessionRecord(
+                speaker: last.speaker,
+                text: last.text,
+                timestamp: last.timestamp
+            ))
         }
     }
 }

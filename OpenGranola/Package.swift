@@ -1,23 +1,23 @@
-// swift-tools-version: 6.2
+// swift-tools-version: 6.0
 
 import PackageDescription
 
 let package = Package(
-    name: "OpenGranola",
-    platforms: [.macOS(.v26)],
+    name: "Gelato",
+    platforms: [.macOS(.v15)],
     dependencies: [
         .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.7.9"),
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.7.0"),
     ],
     targets: [
         .executableTarget(
-            name: "OpenGranola",
+            name: "Gelato",
             dependencies: [
                 .product(name: "FluidAudio", package: "FluidAudio"),
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
             path: "Sources/OpenGranola",
-            exclude: ["Info.plist", "OpenGranola.entitlements", "Assets"]
+            exclude: ["Info.plist", "Gelato.entitlements", "Assets"]
         ),
     ]
 )

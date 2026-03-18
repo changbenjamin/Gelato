@@ -3,7 +3,6 @@ import SwiftUI
 struct ControlBar: View {
     let isRunning: Bool
     let audioLevel: Float
-    let selectedModel: String
     let statusMessage: String?
     let errorMessage: String?
     let onToggle: () -> Void
@@ -55,15 +54,26 @@ struct ControlBar: View {
                 }
                 .buttonStyle(.plain)
 
-                // Audio level bars when running
+                // Audio level bars + stop button when running
                 if isRunning {
                     AudioLevelView(level: audioLevel)
                         .frame(width: 40, height: 14)
+
+                    Button(action: onToggle) {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.white)
+                            .frame(width: 24, height: 24)
+                            .background(Color.red)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop recording")
                 }
 
                 Spacer()
 
-                Text(modelDisplayName)
+                Text("Parakeet-TDT v2")
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundStyle(.tertiary)
                     .padding(.horizontal, 8)
@@ -76,9 +86,6 @@ struct ControlBar: View {
         }
     }
 
-    private var modelDisplayName: String {
-        selectedModel.split(separator: "/").last.map(String.init) ?? selectedModel
-    }
 }
 
 /// Mini audio level visualizer — a few bars that react to mic input.

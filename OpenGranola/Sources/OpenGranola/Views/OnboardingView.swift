@@ -7,23 +7,13 @@ struct OnboardingView: View {
     private let steps: [(icon: String, title: String, body: String)] = [
         (
             "waveform.circle",
-            "Welcome to OpenGranola",
-            "A real-time meeting copilot that listens to your conversations and generates smart talking points — all running locally on your Mac."
+            "Welcome to Gelato",
+            "A real-time meeting transcriber that captures your conversations — all running locally on your Mac."
         ),
         (
             "text.quote",
             "Live Transcript",
-            "Your conversation is transcribed in real time. \"You\" captures your mic, \"Them\" captures system audio from the other side. Expand the transcript panel to follow along."
-        ),
-        (
-            "lightbulb",
-            "AI Suggestions",
-            "As the conversation progresses, OpenGranola pulls relevant context from your knowledge base and suggests talking points. The best suggestions surface automatically."
-        ),
-        (
-            "rectangle.on.rectangle",
-            "Floating Overlay",
-            "Use the overlay button to pop out a compact floating panel — it stays on top of your meeting app so you can glance at suggestions without switching windows."
+            "Your conversation is transcribed in real time. \"You\" captures your mic, \"Them\" captures system audio from the other side."
         ),
     ]
 

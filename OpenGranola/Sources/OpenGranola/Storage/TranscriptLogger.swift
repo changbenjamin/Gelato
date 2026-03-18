@@ -1,6 +1,6 @@
 import Foundation
 
-/// Auto-saves transcripts as plain text files to ~/Documents/OpenGranola/
+/// Auto-saves transcripts as plain text files to ~/Documents/Gelato/
 actor TranscriptLogger {
     private let directory: URL
     private var currentFile: URL?
@@ -9,7 +9,7 @@ actor TranscriptLogger {
 
     init() {
         directory = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Documents/OpenGranola", isDirectory: true)
+            .appendingPathComponent("Documents/Gelato", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 
@@ -23,7 +23,7 @@ actor TranscriptLogger {
         let headerFmt = DateFormatter()
         headerFmt.dateStyle = .medium
         headerFmt.timeStyle = .short
-        sessionHeader = "OpenGranola - \(headerFmt.string(from: now))\n\n"
+        sessionHeader = "Gelato - \(headerFmt.string(from: now))\n\n"
 
         FileManager.default.createFile(atPath: currentFile!.path, contents: sessionHeader.data(using: .utf8))
         fileHandle = try? FileHandle(forWritingTo: currentFile!)

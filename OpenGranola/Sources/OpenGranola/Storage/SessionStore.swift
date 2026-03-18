@@ -9,7 +9,7 @@ actor SessionStore {
 
     init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        sessionsDirectory = appSupport.appendingPathComponent("OpenGranola/sessions", isDirectory: true)
+        sessionsDirectory = appSupport.appendingPathComponent("Gelato/sessions", isDirectory: true)
 
         try? FileManager.default.createDirectory(at: sessionsDirectory, withIntermediateDirectories: true)
 
@@ -44,6 +44,9 @@ actor SessionStore {
         fileHandle = nil
         currentFile = nil
     }
+
+    /// URL of the current session file (nil if no session is active).
+    var currentSessionURL: URL? { currentFile }
 
     var sessionsDirectoryURL: URL { sessionsDirectory }
 }
