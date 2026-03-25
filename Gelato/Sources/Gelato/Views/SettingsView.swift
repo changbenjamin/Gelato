@@ -20,8 +20,30 @@ struct SettingsView: View {
             }
 
             Section("Transcription") {
+                Picker("Mode", selection: $settings.transcriptionMode) {
+                    ForEach(TranscriptionMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .font(.system(size: 12))
+
                 TextField("Locale (e.g. en-US)", text: $settings.transcriptionLocale)
                     .font(.system(size: 12, design: .monospaced))
+
+                Text(settings.transcriptionMode.description)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("API Keys") {
+                Text("Keys are loaded from `.env`, not Keychain.")
+                    .font(.system(size: 12))
+                Text("Current app config path: ~/Library/Application Support/Gelato/.env")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Text("After editing `.env`, relaunch Gelato to pick up changes.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
 
             Section("Privacy") {

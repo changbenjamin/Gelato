@@ -149,11 +149,15 @@ struct SessionDetailView: View {
                         .foregroundStyle(.tertiary)
                     Spacer()
                 } else {
-                    TranscriptView(
-                        utterances: utterances,
-                        volatileYouText: "",
-                        volatileThemText: ""
-                    )
+                    VStack(spacing: 0) {
+                        AudioSessionCard(sessionID: session.id, library: library)
+                        Divider()
+                        TranscriptView(
+                            utterances: utterances,
+                            volatileYouText: "",
+                            volatileThemText: ""
+                        )
+                    }
                 }
             }
         }

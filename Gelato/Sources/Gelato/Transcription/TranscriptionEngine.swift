@@ -28,6 +28,7 @@ final class TranscriptionEngine {
     private let systemCapture = SystemAudioCapture()
     private let micCapture = MicCapture()
     private let transcriptStore: TranscriptStore
+    private var audioRecorder: SessionAudioRecorder?
 
     /// Audio level from mic for the UI meter.
     var audioLevel: Float { micCapture.audioLevel }
@@ -54,10 +55,15 @@ final class TranscriptionEngine {
         self.transcriptStore = transcriptStore
     }
 
-    func start(locale: Locale, inputDeviceID: AudioDeviceID = 0) async {
+    func start(
+        locale: Locale,
+        inputDeviceID: AudioDeviceID = 0,
+        audioRecorder: SessionAudioRecorder? = nil
+    ) async {
         diagLog("[ENGINE-0] start() called, isRunning=\(isRunning)")
         guard !isRunning else { return }
         lastError = nil
+        self.audioRecorder = audioRecorder
 
         guard await ensureMicrophonePermission() else { return }
 
@@ -95,14 +101,24 @@ final class TranscriptionEngine {
         userSelectedDeviceID = inputDeviceID
         let targetMicID = inputDeviceID > 0 ? inputDeviceID : MicCapture.defaultInputDeviceID()
         currentMicDeviceID = targetMicID ?? 0
+        let audioRecorder = self.audioRecorder
         diagLog("[ENGINE-3] starting mic capture, targetMicID=\(String(describing: targetMicID))")
-        let micStream = micCapture.bufferStream(deviceID: targetMicID)
+        let micStream = micCapture.bufferStream(
+            deviceID: targetMicID,
+            onBuffer: { buffer in
+                audioRecorder?.appendMicBuffer(buffer)
+            }
+        )
 
         // 3. Start system audio capture
         diagLog("[ENGINE-4] starting system audio capture...")
         let sysStreams: SystemAudioCapture.CaptureStreams?
         do {
-            sysStreams = try await systemCapture.bufferStream()
+            sysStreams = try await systemCapture.bufferStream(
+                onSystemBuffer: { buffer in
+                    audioRecorder?.appendSystemBuffer(buffer)
+                }
+            )
             diagLog("[ENGINE-5] system audio capture started OK")
         } catch {
             let msg = "Failed to start system audio: \(error.localizedDescription)"
@@ -184,7 +200,13 @@ final class TranscriptionEngine {
         currentMicDeviceID = targetMicID
 
         // Start new mic stream
-        let micStream = micCapture.bufferStream(deviceID: targetMicID)
+        let audioRecorder = self.audioRecorder
+        let micStream = micCapture.bufferStream(
+            deviceID: targetMicID,
+            onBuffer: { buffer in
+                audioRecorder?.appendMicBuffer(buffer)
+            }
+        )
         let store = transcriptStore
         let micTranscriber = StreamingTranscriber(
             asrManager: asrManager,
@@ -284,6 +306,8 @@ final class TranscriptionEngine {
         micKeepAliveTask = nil
         Task { await systemCapture.stop() }
         micCapture.stop()
+        audioRecorder?.finish()
+        audioRecorder = nil
         currentMicDeviceID = 0
         isRunning = false
         assetStatus = "Ready"

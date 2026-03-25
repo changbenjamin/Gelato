@@ -9,3 +9,5 @@ Gelato/.build/
 data/
 CLAUDE.md
 AGENTS.md
+.env
+.gelato.env

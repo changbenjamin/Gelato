@@ -39,6 +39,21 @@ actor SessionStore {
         }
     }
 
+    func replaceRecords(_ records: [SessionRecord]) {
+        guard let currentFile else { return }
+
+        do {
+            let data = try records.reduce(into: Data()) { partialResult, record in
+                partialResult.append(try encoder.encode(record))
+                partialResult.append(Data("\n".utf8))
+            }
+            try data.write(to: currentFile, options: .atomic)
+            fileHandle = try? FileHandle(forWritingTo: currentFile)
+        } catch {
+            print("SessionStore: failed to replace records: \(error)")
+        }
+    }
+
     func endSession() {
         try? fileHandle?.close()
         fileHandle = nil

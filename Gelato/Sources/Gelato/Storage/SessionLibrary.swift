@@ -101,6 +101,47 @@ actor SessionLibrary {
         try? text.write(to: notesURL, atomically: true, encoding: .utf8)
     }
 
+    func upsertGeneratedNotes(for sessionID: String, text: String) {
+        let notesURL = sessionsDirectory.appendingPathComponent("\(sessionID).notes.txt")
+        let existing = (try? String(contentsOf: notesURL, encoding: .utf8)) ?? ""
+        let generatedBlock = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let finalText: String
+        if existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            finalText = generatedBlock
+        } else {
+            finalText = existing.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n## AI-Generated Notes\n\n" + generatedBlock
+        }
+
+        try? finalText.trimmingCharacters(in: .whitespacesAndNewlines).write(
+            to: notesURL,
+            atomically: true,
+            encoding: .utf8
+        )
+    }
+
+    func audioFiles(for sessionID: String) -> SessionAudioFiles? {
+        let combinedURL = sessionsDirectory.appendingPathComponent("\(sessionID)_combined.m4a")
+        let micURL = sessionsDirectory.appendingPathComponent("\(sessionID)_you.caf")
+        let systemURL = sessionsDirectory.appendingPathComponent("\(sessionID)_them.caf")
+
+        let fm = FileManager.default
+        let hasCombined = fm.fileExists(atPath: combinedURL.path)
+        let hasMic = fm.fileExists(atPath: micURL.path)
+        let hasSystem = fm.fileExists(atPath: systemURL.path)
+        guard hasCombined || hasMic || hasSystem else { return nil }
+
+        return SessionAudioFiles(
+            combinedURL: hasCombined ? combinedURL : nil,
+            micURL: hasMic ? micURL : nil,
+            systemURL: hasSystem ? systemURL : nil
+        )
+    }
+
+    func combinedAudioOutputURL(for sessionID: String) -> URL {
+        sessionsDirectory.appendingPathComponent("\(sessionID)_combined.m4a")
+    }
+
     /// Generate .meta.json for any existing .jsonl files that lack one (migration).
     /// Also re-generates metadata that is missing the wordCount field.
     func backfillMissingMetadata() {

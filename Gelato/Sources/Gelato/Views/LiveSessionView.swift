@@ -77,11 +77,17 @@ struct LiveSessionView: View {
                 }
 
             case .transcript:
-                TranscriptView(
-                    utterances: transcriptStore.utterances,
-                    volatileYouText: transcriptStore.volatileYouText,
-                    volatileThemText: transcriptStore.volatileThemText
-                )
+                VStack(spacing: 0) {
+                    if let sessionID {
+                        AudioSessionCard(sessionID: sessionID, library: library)
+                    }
+                    Divider()
+                    TranscriptView(
+                        utterances: transcriptStore.utterances,
+                        volatileYouText: transcriptStore.volatileYouText,
+                        volatileThemText: transcriptStore.volatileThemText
+                    )
+                }
             }
 
             Divider()

@@ -8,6 +8,7 @@ final class SystemAudioCapture: NSObject, @unchecked Sendable, SCStreamDelegate,
     private let _stream = OSAllocatedUnfairLock<SCStream?>(uncheckedState: nil)
     private let _sysContinuation = OSAllocatedUnfairLock<AsyncStream<AVAudioPCMBuffer>.Continuation?>(uncheckedState: nil)
     private let _micContinuation = OSAllocatedUnfairLock<AsyncStream<AVAudioPCMBuffer>.Continuation?>(uncheckedState: nil)
+    private let _onSystemBuffer = OSAllocatedUnfairLock<(@Sendable (AVAudioPCMBuffer) -> Void)?>(uncheckedState: nil)
     private let _audioLevel = AudioLevel()
 
     var audioLevel: Float { _audioLevel.value }
@@ -16,7 +17,10 @@ final class SystemAudioCapture: NSObject, @unchecked Sendable, SCStreamDelegate,
         let systemAudio: AsyncStream<AVAudioPCMBuffer>
     }
 
-    func bufferStream() async throws -> CaptureStreams {
+    func bufferStream(
+        onSystemBuffer: (@Sendable (AVAudioPCMBuffer) -> Void)? = nil
+    ) async throws -> CaptureStreams {
+        _onSystemBuffer.withLock { $0 = onSystemBuffer }
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
 
         guard let display = content.displays.first else {
@@ -91,6 +95,7 @@ final class SystemAudioCapture: NSObject, @unchecked Sendable, SCStreamDelegate,
             diagLog("[SYS-RAW] #\(count) frames=\(frameCount) sr=\(asbd.mSampleRate) ch=\(asbd.mChannelsPerFrame) rms=\(rms)")
         }
 
+        _onSystemBuffer.withLock { $0?(pcmBuffer) }
         _sysContinuation.withLock { _ = $0?.yield(pcmBuffer) }
     }
 

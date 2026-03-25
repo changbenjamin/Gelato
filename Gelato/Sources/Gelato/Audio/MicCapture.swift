@@ -29,7 +29,10 @@ final class MicCapture: @unchecked Sendable {
         )
     }
 
-    func bufferStream(deviceID: AudioDeviceID? = nil) -> AsyncStream<AVAudioPCMBuffer> {
+    func bufferStream(
+        deviceID: AudioDeviceID? = nil,
+        onBuffer: (@Sendable (AVAudioPCMBuffer) -> Void)? = nil
+    ) -> AsyncStream<AVAudioPCMBuffer> {
         let level = _audioLevel
         let errorHolder = _error
 
@@ -92,6 +95,7 @@ final class MicCapture: @unchecked Sendable {
                     diagLog("[MIC-6] tap #\(tapCallCount): frames=\(buffer.frameLength) rms=\(rms) level=\(level.value)")
                 }
 
+                onBuffer?(buffer)
                 continuation.yield(buffer)
             }
 

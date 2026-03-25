@@ -135,4 +135,12 @@ fi
 cp -R "$APP_DIR" /Applications/
 echo "Installed to /Applications/$APP_NAME.app"
 
+# Sync local .env into Application Support so the packaged app can read it.
+APP_SUPPORT_DIR="$HOME/Library/Application Support/Gelato"
+mkdir -p "$APP_SUPPORT_DIR"
+if [[ -f "$ROOT_DIR/.env" ]]; then
+  cp "$ROOT_DIR/.env" "$APP_SUPPORT_DIR/.env"
+  echo "Synced .env to $APP_SUPPORT_DIR/.env"
+fi
+
 echo "=== Build complete ==="

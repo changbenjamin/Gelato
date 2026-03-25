@@ -41,6 +41,21 @@ actor TranscriptLogger {
         }
     }
 
+    func replaceTranscript(with utterances: [Utterance]) {
+        guard let currentFile else { return }
+
+        let timeFmt = DateFormatter()
+        timeFmt.dateFormat = "HH:mm:ss"
+        let body = utterances.map { utterance in
+            "[\(timeFmt.string(from: utterance.timestamp))] \(utterance.speaker == .you ? "You" : "Them"): \(utterance.text)"
+        }.joined(separator: "\n")
+
+        let content = body.isEmpty ? sessionHeader : "\(sessionHeader)\(body)\n"
+        try? content.write(to: currentFile, atomically: true, encoding: .utf8)
+        fileHandle = try? FileHandle(forWritingTo: currentFile)
+        fileHandle?.seekToEndOfFile()
+    }
+
     func endSession() {
         try? fileHandle?.close()
         fileHandle = nil
