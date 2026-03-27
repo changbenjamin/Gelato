@@ -165,8 +165,8 @@ struct MeetingQAContainerView: View {
             LinearGradient(
                 stops: [
                     .init(color: Color.warmBackground.opacity(0), location: 0),
-                    .init(color: Color.warmBackground.opacity(0.22), location: 0.34),
-                    .init(color: Color.warmBackground, location: 1)
+                    .init(color: Color.warmBackground.opacity(0.18), location: 0.18),
+                    .init(color: Color.warmBackground, location: 0.58)
                 ],
                 startPoint: .top,
                 endPoint: .bottom
@@ -178,8 +178,11 @@ struct MeetingQAContainerView: View {
                 if isExpanded {
                     expandedPanel(showsWindowControls: true, fillsHeight: false)
                         .frame(maxWidth: 860)
+                } else if store.conversation.messages.isEmpty {
+                    collapsedEmptyPanel
+                        .frame(maxWidth: 860)
                 } else {
-                    collapsedPanel
+                    collapsedHistoryPanel
                         .frame(maxWidth: 860)
                 }
             }
@@ -189,16 +192,14 @@ struct MeetingQAContainerView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
     }
 
-    private var collapsedPanel: some View {
+    private var collapsedHistoryPanel: some View {
         Button {
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
-                isExpanded = true
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            isExpanded = true
+            DispatchQueue.main.async {
                 isComposerFocused = true
             }
         } label: {
-            collapsedComposerBar
+            collapsedComposerBar(isInteractive: false)
                 .padding(16)
                 .background(
                     RoundedRectangle(cornerRadius: 28, style: .continuous)
@@ -215,19 +216,68 @@ struct MeetingQAContainerView: View {
         .frame(maxWidth: .infinity, alignment: .center)
     }
 
-    private var collapsedComposerBar: some View {
+    private var collapsedEmptyPanel: some View {
+        collapsedComposerBar(isInteractive: true)
+            .padding(16)
+            .background(Color.warmCardBg)
+            .overlay(
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .stroke(Color.warmBorder, lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+            .shadow(color: .black.opacity(0.06), radius: 18, y: 8)
+            .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    @ViewBuilder
+    private func collapsedComposerBar(isInteractive: Bool) -> some View {
         HStack(alignment: .center, spacing: 10) {
-            Text("Ask anything here")
-                .font(.system(size: 15))
-                .foregroundStyle(Color(nsColor: .placeholderTextColor))
-                .lineSpacing(0)
+            if isInteractive {
+                TextField("Ask anything here", text: $store.draft, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 15))
+                    .foregroundStyle(Color.warmTextPrimary)
+                    .lineSpacing(0)
+                    .lineLimit(1...3)
+                    .focused($isComposerFocused)
+                    .disabled(store.isSubmitting || store.isAPIKeyMissing)
+                    .onSubmit {
+                        submitQuestion()
+                    }
+            } else {
+                Text("Ask anything here")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Color(nsColor: .placeholderTextColor))
+                    .lineSpacing(0)
+            }
             Spacer()
 
-            Image(systemName: "arrow.up")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Color(nsColor: .placeholderTextColor))
-                .frame(width: 32, height: 32)
-                .background(Circle().fill(Color.warmHover))
+            if isInteractive {
+                Button {
+                    submitQuestion()
+                } label: {
+                    if store.isSubmitting {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 32, height: 32)
+                    } else {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(width: 32, height: 32)
+                    }
+                }
+                .buttonStyle(.plain)
+                .background(Circle().fill(store.canSubmitQuestion ? Color.warmThemTint : Color.warmHover))
+                .foregroundStyle(store.canSubmitQuestion ? Color.warmTextPrimary : Color.warmTextMuted)
+                .clipShape(Circle())
+                .disabled(!store.canSubmitQuestion)
+            } else {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color(nsColor: .placeholderTextColor))
+                    .frame(width: 32, height: 32)
+                    .background(Circle().fill(Color.warmHover))
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -372,16 +422,14 @@ struct MeetingQAContainerView: View {
                         RoundedRectangle(cornerRadius: 22, style: .continuous)
                             .stroke(Color.warmBorder, lineWidth: 1)
                     )
-            )
+                    )
         }
     }
 
     private func submitQuestion() {
         guard store.canSubmitQuestion else { return }
         if presentation == .floating {
-            withAnimation(.easeInOut(duration: 0.18)) {
-                isExpanded = true
-            }
+            isExpanded = true
         }
         store.submitQuestion()
     }
@@ -402,16 +450,11 @@ private struct MeetingQAMessageList: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     if messages.isEmpty {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Ask about owners, deadlines, commitments, or decisions.")
-                                .font(.system(size: 14, weight: .medium))
-                                .foregroundStyle(Color.warmTextSecondary)
-                            Text("The answer will be grounded in the transcript for this meeting.")
-                                .font(.system(size: 12))
-                                .foregroundStyle(Color.warmTextMuted)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, 8)
+                        Text("No chat yet.")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color.warmTextMuted)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 8)
                     }
 
                     ForEach(messages) { message in

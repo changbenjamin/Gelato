@@ -5,6 +5,8 @@ import SwiftUI
 struct NotesView: View {
     let sessionID: String
     let library: SessionLibrary
+    var bottomContentInset: CGFloat = 0
+    var onTextChange: ((String) -> Void)? = nil
 
     @State private var text: String = ""
     @State private var saveTask: Task<Void, Never>?
@@ -12,16 +14,22 @@ struct NotesView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            MarkdownTextView(text: $text, placeholder: "Write notes...")
+            MarkdownTextView(
+                text: $text,
+                placeholder: "Write notes...",
+                bottomContentInset: bottomContentInset
+            )
                 .padding(20)
                 .background(Color.warmBackground)
         }
         .task {
             let loaded = await library.loadNotes(for: sessionID)
             text = MarkdownListNormalizer.normalize(loaded)
+            onTextChange?(text)
             isLoaded = true
         }
         .onChange(of: text) {
+            onTextChange?(text)
             guard isLoaded else { return }
             saveTask?.cancel()
             saveTask = Task {
@@ -36,6 +44,7 @@ struct NotesView: View {
 private struct MarkdownTextView: NSViewRepresentable {
     @Binding var text: String
     let placeholder: String
+    let bottomContentInset: CGFloat
 
     func makeCoordinator() -> Coordinator {
         Coordinator(text: $text, placeholder: placeholder)
@@ -46,6 +55,7 @@ private struct MarkdownTextView: NSViewRepresentable {
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
+        scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: bottomContentInset, right: 0)
         scrollView.wantsLayer = true
         scrollView.layer?.cornerRadius = 18
         scrollView.layer?.masksToBounds = true
@@ -81,6 +91,7 @@ private struct MarkdownTextView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
+        nsView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: bottomContentInset, right: 0)
         context.coordinator.placeholder = placeholder
         context.coordinator.textView?.placeholder = placeholder
         if context.coordinator.textView?.string != text {

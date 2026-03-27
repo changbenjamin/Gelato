@@ -59,6 +59,7 @@ struct SessionDetailView: View {
     @State private var editableTitle: String = ""
     @State private var titleSaveTask: Task<Void, Never>?
     @State private var utterances: [Utterance] = []
+    @State private var notesMarkdown = ""
     @State private var isLoading = true
     @State private var selectedTab: DetailTab = .notes
     @StateObject private var meetingQAStore = MeetingQAStore()
@@ -68,10 +69,12 @@ struct SessionDetailView: View {
         VStack(spacing: 0) {
             // Title + metadata header
             VStack(alignment: .leading, spacing: 6) {
-                TextField("Session title", text: $editableTitle)
+                TextField("Session title", text: $editableTitle, axis: .vertical)
                     .font(.gelatoSerif(size: 28, weight: .semibold))
                     .foregroundStyle(Color.warmTextPrimary)
                     .textFieldStyle(.plain)
+                    .lineLimit(1...3)
+                    .fixedSize(horizontal: false, vertical: true)
                     .focused($isTitleFocused)
                     .onSubmit {
                         isTitleFocused = false
@@ -103,23 +106,6 @@ struct SessionDetailView: View {
                             .font(.system(size: 12))
                             .foregroundStyle(Color.warmTextMuted)
                     }
-
-                    Spacer()
-
-                    if !utterances.isEmpty {
-                        Button {
-                            copyTranscript()
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: "doc.on.doc")
-                                    .font(.system(size: 11))
-                                Text("Copy")
-                                    .font(.system(size: 11))
-                            }
-                            .foregroundStyle(Color.warmTextMuted)
-                        }
-                        .buttonStyle(.plain)
-                    }
                 }
             }
             .padding(.horizontal, 24)
@@ -130,6 +116,26 @@ struct SessionDetailView: View {
             HStack {
                 DetailTabPicker(selection: $selectedTab)
                 Spacer()
+
+                Button {
+                    copyCurrentTab()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 11))
+                        Text("Copy")
+                            .font(.system(size: 11))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .foregroundStyle(Color.warmTextMuted)
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.warmTextMuted.opacity(0.75), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(!canCopyCurrentTab)
             }
             .padding(.horizontal, 24)
             .padding(.bottom, 12)
@@ -152,6 +158,7 @@ struct SessionDetailView: View {
         .task(id: session.id) {
             editableTitle = session.metadata.title
             let loaded = await library.loadTranscript(for: session.id)
+            notesMarkdown = await library.loadNotes(for: session.id)
             utterances = loaded
             await meetingQAStore.prepare(
                 sessionID: session.id,
@@ -197,8 +204,13 @@ struct SessionDetailView: View {
     private var contentView: some View {
         switch selectedTab {
         case .notes:
-            NotesView(sessionID: session.id, library: library)
-                .padding(.bottom, showsFloatingMeetingQA ? 24 : 0)
+            NotesView(
+                sessionID: session.id,
+                library: library,
+                bottomContentInset: floatingChatClearance,
+                onTextChange: { notesMarkdown = $0 }
+            )
+                .padding(.bottom, showsFloatingMeetingQA ? 8 : 0)
 
         case .transcript:
             if isLoading {
@@ -220,10 +232,11 @@ struct SessionDetailView: View {
                     TranscriptView(
                         utterances: utterances,
                         volatileYouText: "",
-                        volatileThemText: ""
+                        volatileThemText: "",
+                        bottomContentPadding: floatingChatClearance
                     )
                 }
-                .padding(.bottom, showsFloatingMeetingQA ? 24 : 0)
+                .padding(.bottom, showsFloatingMeetingQA ? 8 : 0)
             }
 
         case .chat:
@@ -257,6 +270,10 @@ struct SessionDetailView: View {
         return "\(hrs)h \(remainMins)m"
     }
 
+    private var floatingChatClearance: CGFloat {
+        showsFloatingMeetingQA ? 280 : 0
+    }
+
     private func copyTranscript() {
         let timeFmt = DateFormatter()
         timeFmt.dateFormat = "HH:mm:ss"
@@ -265,5 +282,40 @@ struct SessionDetailView: View {
         }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
+    }
+
+    private var canCopyCurrentTab: Bool {
+        switch selectedTab {
+        case .notes:
+            return true
+        case .transcript:
+            return !utterances.isEmpty
+        case .chat:
+            return !meetingQAStore.conversation.messages.isEmpty
+        }
+    }
+
+    private func copyCurrentTab() {
+        switch selectedTab {
+        case .notes:
+            copyToPasteboard(notesMarkdown)
+        case .transcript:
+            copyTranscript()
+        case .chat:
+            copyChatConversation()
+        }
+    }
+
+    private func copyChatConversation() {
+        let lines = meetingQAStore.conversation.messages.map { message in
+            let speaker = message.role == .user ? "You" : "ChatGPT"
+            return "\(speaker): \(message.content)"
+        }
+        copyToPasteboard(lines.joined(separator: "\n\n"))
+    }
+
+    private func copyToPasteboard(_ string: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(string, forType: .string)
     }
 }
