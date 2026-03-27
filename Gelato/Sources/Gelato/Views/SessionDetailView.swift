@@ -176,7 +176,7 @@ struct SessionDetailView: View {
                             .font(.system(size: 11))
                     }
                     .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
+                    .frame(height: 28)
                     .background(
                         Capsule()
                             .fill(Color.warmCardBg)
@@ -201,7 +201,7 @@ struct SessionDetailView: View {
                             .font(.system(size: 11))
                     }
                     .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
+                    .frame(height: 28)
                     .background(
                         Capsule()
                             .fill(Color.warmCardBg)
