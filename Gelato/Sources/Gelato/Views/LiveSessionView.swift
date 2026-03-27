@@ -57,7 +57,7 @@ struct LiveSessionView: View {
 
             // Tab picker
             HStack {
-                DetailTabPicker(selection: $selectedTab)
+                DetailTabPicker(selection: $selectedTab, tabs: [.notes, .transcript])
                 Spacer()
             }
             .padding(.horizontal, 24)
@@ -91,6 +91,13 @@ struct LiveSessionView: View {
                         volatileThemText: transcriptStore.volatileThemText
                     )
                 }
+
+            case .chat:
+                Spacer()
+                Text("Chat becomes available after the meeting is finished.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.warmTextMuted)
+                Spacer()
             }
 
             Divider()

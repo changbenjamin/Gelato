@@ -62,7 +62,8 @@ struct ContentView: View {
                 SessionDetailView(
                     session: session,
                     library: sessionLibrary,
-                    listModel: sessionListModel ?? SessionListModel(library: sessionLibrary)
+                    listModel: sessionListModel ?? SessionListModel(library: sessionLibrary),
+                    openAIAPIKey: settings.openAIAPIKey
                 )
                 .id(session.id) // force recreate when selection changes
             } else {

@@ -5,15 +5,22 @@ import SwiftUI
 enum DetailTab: String, CaseIterable {
     case notes = "Notes"
     case transcript = "Transcript"
+    case chat = "Chat"
 }
 
 /// Rounded-capsule toggle picker matching the Cowork/Code style.
 struct DetailTabPicker: View {
+    let tabs: [DetailTab]
     @Binding var selection: DetailTab
+
+    init(selection: Binding<DetailTab>, tabs: [DetailTab] = DetailTab.allCases) {
+        self.tabs = tabs
+        self._selection = selection
+    }
 
     var body: some View {
         HStack(spacing: 0) {
-            ForEach(DetailTab.allCases, id: \.self) { tab in
+            ForEach(tabs, id: \.self) { tab in
                 Button {
                     withAnimation(.easeInOut(duration: 0.15)) {
                         selection = tab
@@ -47,12 +54,14 @@ struct SessionDetailView: View {
     let session: SessionSummary
     let library: SessionLibrary
     let listModel: SessionListModel
+    let openAIAPIKey: String
 
     @State private var editableTitle: String = ""
     @State private var titleSaveTask: Task<Void, Never>?
     @State private var utterances: [Utterance] = []
     @State private var isLoading = true
     @State private var selectedTab: DetailTab = .notes
+    @StateObject private var meetingQAStore = MeetingQAStore()
     @FocusState private var isTitleFocused: Bool
 
     var body: some View {
@@ -128,42 +137,29 @@ struct SessionDetailView: View {
             Divider()
                 .overlay(Color.warmBorder)
 
-            // Content based on selected tab
-            switch selectedTab {
-            case .notes:
-                NotesView(sessionID: session.id, library: library)
+            ZStack(alignment: .bottom) {
+                contentView
 
-            case .transcript:
-                if isLoading {
-                    Spacer()
-                    ProgressView("Loading transcript...")
-                        .font(.system(size: 12))
-                    Spacer()
-                } else if utterances.isEmpty {
-                    Spacer()
-                    Text("No transcript data")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Color.warmTextMuted)
-                    Spacer()
-                } else {
-                    VStack(spacing: 0) {
-                        AudioSessionCard(sessionID: session.id, library: library)
-                        Divider()
-                            .overlay(Color.warmBorder)
-                        TranscriptView(
-                            utterances: utterances,
-                            volatileYouText: "",
-                            volatileThemText: ""
-                        )
-                    }
+                if showsFloatingMeetingQA {
+                    MeetingQAContainerView(
+                        presentation: .floating,
+                        store: meetingQAStore
+                    )
                 }
             }
         }
         .background(Color.warmBackground)
-        .task {
+        .task(id: session.id) {
             editableTitle = session.metadata.title
             let loaded = await library.loadTranscript(for: session.id)
             utterances = loaded
+            await meetingQAStore.prepare(
+                sessionID: session.id,
+                sessionTitle: editableTitle,
+                utterances: loaded,
+                library: library,
+                apiKey: openAIAPIKey
+            )
             isLoading = false
         }
         .onChange(of: editableTitle) {
@@ -176,6 +172,12 @@ struct SessionDetailView: View {
                 guard !trimmed.isEmpty else { return }
                 await listModel.updateTitle(sessionID: session.id, newTitle: trimmed)
             }
+            meetingQAStore.updateContext(
+                sessionTitle: editableTitle,
+                utterances: utterances,
+                library: library,
+                apiKey: openAIAPIKey
+            )
         }
     }
 
@@ -185,6 +187,64 @@ struct SessionDetailView: View {
         let fmt = DateFormatter()
         fmt.dateFormat = "MMM d, yyyy"
         return fmt.string(from: session.metadata.createdAt)
+    }
+
+    private var showsFloatingMeetingQA: Bool {
+        !isLoading && !utterances.isEmpty && selectedTab != .chat
+    }
+
+    @ViewBuilder
+    private var contentView: some View {
+        switch selectedTab {
+        case .notes:
+            NotesView(sessionID: session.id, library: library)
+                .padding(.bottom, showsFloatingMeetingQA ? 24 : 0)
+
+        case .transcript:
+            if isLoading {
+                Spacer()
+                ProgressView("Loading transcript...")
+                    .font(.system(size: 12))
+                Spacer()
+            } else if utterances.isEmpty {
+                Spacer()
+                Text("No transcript data")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.warmTextMuted)
+                Spacer()
+            } else {
+                VStack(spacing: 0) {
+                    AudioSessionCard(sessionID: session.id, library: library)
+                    Divider()
+                        .overlay(Color.warmBorder)
+                    TranscriptView(
+                        utterances: utterances,
+                        volatileYouText: "",
+                        volatileThemText: ""
+                    )
+                }
+                .padding(.bottom, showsFloatingMeetingQA ? 24 : 0)
+            }
+
+        case .chat:
+            if isLoading {
+                Spacer()
+                ProgressView("Loading transcript...")
+                    .font(.system(size: 12))
+                Spacer()
+            } else if utterances.isEmpty {
+                Spacer()
+                Text("No transcript data")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.warmTextMuted)
+                Spacer()
+            } else {
+                MeetingQAContainerView(
+                    presentation: .fullPage,
+                    store: meetingQAStore
+                )
+            }
+        }
     }
 
     private func formattedDuration(_ seconds: TimeInterval) -> String {

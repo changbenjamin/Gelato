@@ -4,6 +4,17 @@ import Foundation
 actor SessionLibrary {
     private let sessionsDirectory: URL
     private let decoder = SessionAudioTiming.makeJSONDecoder()
+    private let meetingQAEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return encoder
+    }()
+    private let meetingQADecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
 
     init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -96,6 +107,21 @@ actor SessionLibrary {
     func saveNotes(for sessionID: String, text: String) {
         let notesURL = sessionsDirectory.appendingPathComponent("\(sessionID).notes.txt")
         try? text.write(to: notesURL, atomically: true, encoding: .utf8)
+    }
+
+    func loadMeetingQAConversation(for sessionID: String) -> MeetingQAConversation {
+        let conversationURL = sessionsDirectory.appendingPathComponent("\(sessionID).qa-chat.json")
+        guard let data = try? Data(contentsOf: conversationURL),
+              let conversation = try? meetingQADecoder.decode(MeetingQAConversation.self, from: data) else {
+            return .empty
+        }
+        return conversation
+    }
+
+    func saveMeetingQAConversation(for sessionID: String, conversation: MeetingQAConversation) {
+        let conversationURL = sessionsDirectory.appendingPathComponent("\(sessionID).qa-chat.json")
+        guard let data = try? meetingQAEncoder.encode(conversation) else { return }
+        try? data.write(to: conversationURL, options: .atomic)
     }
 
     func upsertGeneratedNotes(for sessionID: String, text: String) {
