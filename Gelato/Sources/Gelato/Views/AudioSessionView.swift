@@ -8,13 +8,9 @@ struct AudioSessionCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Session Audio")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Color.warmTextMuted)
-
             if let audioFiles {
                 AudioFileCard(
-                    title: "Combined Session Audio",
+                    title: "Session Audio",
                     subtitle: "Play, reveal, or export the mixed session audio.",
                     fileURL: audioFiles.combinedURL ?? audioFiles.micURL ?? audioFiles.systemURL
                 )

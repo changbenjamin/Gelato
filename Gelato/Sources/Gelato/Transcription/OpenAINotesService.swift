@@ -109,6 +109,7 @@ struct OpenAINotesService {
         - Refer to participants by their first name after the first full-name mention, or matching how they were addressed in the meeting.
 
         Also produce a short descriptive title, 5 to 6 words maximum.
+        Do not include any date, day of week, or time in the title.
 
         Return plain text using exactly this format:
         <title>short title here</title>
