@@ -128,6 +128,10 @@ struct SessionDetailView: View {
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
+                    .background(
+                        Capsule()
+                            .fill(Color.warmSidebarBg)
+                    )
                     .foregroundStyle(Color.warmTextMuted)
                     .overlay(
                         Capsule()
@@ -207,7 +211,7 @@ struct SessionDetailView: View {
             NotesView(
                 sessionID: session.id,
                 library: library,
-                bottomContentInset: floatingChatClearance,
+                bottomContentInset: 0,
                 onTextChange: { notesMarkdown = $0 }
             )
                 .padding(.bottom, showsFloatingMeetingQA ? 8 : 0)
@@ -273,6 +277,7 @@ struct SessionDetailView: View {
     private var floatingChatClearance: CGFloat {
         showsFloatingMeetingQA ? 280 : 0
     }
+
 
     private func copyTranscript() {
         let timeFmt = DateFormatter()

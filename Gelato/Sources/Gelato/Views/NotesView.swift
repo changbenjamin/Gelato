@@ -24,18 +24,20 @@ struct NotesView: View {
         }
         .task {
             let loaded = await library.loadNotes(for: sessionID)
-            text = MarkdownListNormalizer.normalize(loaded)
-            onTextChange?(text)
+            let stored = NoteEditorBottomSpacer.storedText(from: loaded)
+            text = NoteEditorBottomSpacer.editorText(fromStored: stored)
+            onTextChange?(stored)
             isLoaded = true
         }
         .onChange(of: text) {
-            onTextChange?(text)
+            let stored = NoteEditorBottomSpacer.storedText(from: text)
+            onTextChange?(stored)
             guard isLoaded else { return }
             saveTask?.cancel()
             saveTask = Task {
                 try? await Task.sleep(for: .milliseconds(500))
                 guard !Task.isCancelled else { return }
-                await library.saveNotes(for: sessionID, text: text)
+                await library.saveNotes(for: sessionID, text: stored)
             }
         }
     }
@@ -113,15 +115,26 @@ private struct MarkdownTextView: NSViewRepresentable {
         @MainActor
         func textDidChange(_ notification: Notification) {
             guard let textView, !isApplying else { return }
-            let normalized = MarkdownListNormalizer.normalize(textView.string)
-            if normalized != textView.string {
+            let stored = NoteEditorBottomSpacer.storedText(from: textView.string)
+            let display = NoteEditorBottomSpacer.editorText(fromStored: stored)
+            if display != textView.string {
                 let selectedRanges = textView.selectedRanges
+                let maxCursorLocation = max(
+                    0,
+                    (display as NSString).length - NoteEditorBottomSpacer.spacerLength(for: display)
+                )
+                let adjustedRanges = selectedRanges.map { value -> NSValue in
+                    let range = value.rangeValue
+                    let location = min(range.location, maxCursorLocation)
+                    let length = min(range.length, max(0, maxCursorLocation - location))
+                    return NSValue(range: NSRange(location: location, length: length))
+                }
                 isApplying = true
-                textView.string = normalized
-                textView.selectedRanges = selectedRanges
+                textView.string = display
+                textView.selectedRanges = adjustedRanges
                 isApplying = false
             }
-            text = normalized
+            text = display
             style(textView: textView)
         }
 
@@ -134,7 +147,7 @@ private struct MarkdownTextView: NSViewRepresentable {
         @MainActor
         func applyText(_ string: String) {
             guard let textView else { return }
-            let normalized = MarkdownListNormalizer.normalize(string)
+            let normalized = NoteEditorBottomSpacer.editorText(fromStored: string)
             isApplying = true
             textView.string = normalized
             style(textView: textView)
@@ -215,12 +228,25 @@ private struct MarkdownTextView: NSViewRepresentable {
             guard let item = EditorListItem(rawLine: rawLine) else { return false }
 
             if item.isEffectivelyEmpty {
-                let updatedText = nsText.replacingCharacters(in: contentRange, with: "")
-                commitEdit(
-                    in: textView,
-                    text: updatedText,
-                    selectedRange: NSRange(location: contentRange.location, length: 0)
-                )
+                if item.indentSpaces > 0 {
+                    let detentedIndentSpaces = max(0, item.indentSpaces - MarkdownListNormalizer.indentWidth)
+                    let detentedLine = item.line(withIndentSpaces: detentedIndentSpaces)
+                    let updatedText = nsText.replacingCharacters(in: contentRange, with: detentedLine)
+                    let newCursorLocation = contentRange.location + (detentedLine as NSString).length
+
+                    commitEdit(
+                        in: textView,
+                        text: updatedText,
+                        selectedRange: NSRange(location: newCursorLocation, length: 0)
+                    )
+                } else {
+                    let updatedText = nsText.replacingCharacters(in: contentRange, with: "")
+                    commitEdit(
+                        in: textView,
+                        text: updatedText,
+                        selectedRange: NSRange(location: contentRange.location, length: 0)
+                    )
+                }
                 return true
             }
 
@@ -242,12 +268,18 @@ private struct MarkdownTextView: NSViewRepresentable {
             text newText: String,
             selectedRange: NSRange
         ) {
-            let normalized = MarkdownListNormalizer.normalize(newText)
+            let normalized = NoteEditorBottomSpacer.editorText(fromStored: newText)
             isApplying = true
             textView.string = normalized
             text = normalized
             style(textView: textView)
-            textView.setSelectedRange(selectedRange)
+            let maxCursorLocation = max(
+                0,
+                (normalized as NSString).length - NoteEditorBottomSpacer.spacerLength(for: normalized)
+            )
+            let clampedLocation = min(selectedRange.location, maxCursorLocation)
+            let clampedLength = min(selectedRange.length, max(0, maxCursorLocation - clampedLocation))
+            textView.setSelectedRange(NSRange(location: clampedLocation, length: clampedLength))
             updateTypingAttributes(for: textView)
             isApplying = false
         }
@@ -310,6 +342,50 @@ private struct MarkdownTextView: NSViewRepresentable {
 
             return NSRange(location: lineRange.location, length: length)
         }
+    }
+}
+
+private enum NoteEditorBottomSpacer {
+    private static let spacerLineMarker = "\u{200B}"
+    private static let spacerLineCount = 5
+    private static let spacerBlock = Array(repeating: spacerLineMarker, count: spacerLineCount).joined(separator: "\n")
+    private static let spacerBlockWithLeadingNewline = "\n" + spacerBlock
+
+    static func editorText(fromStored text: String) -> String {
+        let stored = storedText(from: text)
+        guard !stored.isEmpty else { return "" }
+        if stored.hasSuffix("\n") {
+            return stored + spacerBlock
+        }
+        return stored + spacerBlockWithLeadingNewline
+    }
+
+    static func storedText(from text: String) -> String {
+        MarkdownListNormalizer.normalize(removingSpacer(from: text))
+    }
+
+    static func spacerLength(for editorText: String) -> Int {
+        if editorText.hasSuffix(spacerBlockWithLeadingNewline) {
+            return spacerBlockWithLeadingNewline.utf16.count
+        }
+
+        if editorText.hasSuffix(spacerBlock) {
+            return spacerBlock.utf16.count
+        }
+
+        return 0
+    }
+
+    private static func removingSpacer(from text: String) -> String {
+        if text.hasSuffix(spacerBlockWithLeadingNewline) {
+            return String(text.dropLast(spacerBlockWithLeadingNewline.count))
+        }
+
+        if text.hasSuffix(spacerBlock) {
+            return String(text.dropLast(spacerBlock.count))
+        }
+
+        return text
     }
 }
 

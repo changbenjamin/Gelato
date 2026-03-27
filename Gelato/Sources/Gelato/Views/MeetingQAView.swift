@@ -165,13 +165,13 @@ struct MeetingQAContainerView: View {
             LinearGradient(
                 stops: [
                     .init(color: Color.warmBackground.opacity(0), location: 0),
-                    .init(color: Color.warmBackground.opacity(0.18), location: 0.18),
-                    .init(color: Color.warmBackground, location: 0.58)
+                    .init(color: Color.warmBackground.opacity(0.18), location: 0.34),
+                    .init(color: Color.warmBackground, location: 0.68)
                 ],
                 startPoint: .top,
                 endPoint: .bottom
             )
-            .frame(height: isExpanded ? 460 : 210)
+            .frame(height: isExpanded ? 430 : 180)
             .allowsHitTesting(false)
 
             Group {
