@@ -19,6 +19,17 @@ struct Utterance: Identifiable, Codable, Sendable {
     }
 }
 
+extension Array where Element == Utterance {
+    var chronologicallySorted: [Utterance] {
+        sorted {
+            if $0.timestamp != $1.timestamp {
+                return $0.timestamp < $1.timestamp
+            }
+            return $0.id.uuidString < $1.id.uuidString
+        }
+    }
+}
+
 // MARK: - Session Record
 
 /// Codable record for JSONL session persistence

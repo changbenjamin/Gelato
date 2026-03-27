@@ -6,15 +6,15 @@ struct SessionListView: View {
     @Binding var selectedSession: SessionSummary?
     let isRunning: Bool
     let liveTitle: String
-    let liveWordCount: Int
+    let liveStartTime: Date?
     let onStartSession: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
             HStack {
                 Text("Gelato")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.gelatoSerif(size: 20, weight: .semibold))
+                    .foregroundStyle(Color.warmTextPrimary)
 
                 Spacer()
 
@@ -28,89 +28,111 @@ struct SessionListView: View {
                             Text("New Note")
                                 .font(.system(size: 12, weight: .medium))
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(Color.accentTeal.opacity(0.1))
-                        .foregroundStyle(Color.accentTeal)
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 7)
+                        .background(Color.warmCardBg)
+                        .foregroundStyle(Color.warmTextPrimary)
+                        .overlay {
+                            Capsule()
+                                .stroke(Color.warmBorder, lineWidth: 1)
+                        }
                         .clipShape(Capsule())
                     }
                     .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            .padding(.horizontal, 18)
+            .padding(.top, 18)
+            .padding(.bottom, 14)
 
             Divider()
+                .overlay(Color.warmBorder)
 
-            // Session list
             if listModel.isLoading {
                 Spacer()
                 ProgressView()
                 Spacer()
             } else {
-                List(selection: $selectedSession) {
-                    // Live session card
-                    if isRunning {
-                        Button {
-                            selectedSession = nil // shows live view in detail
-                        } label: {
-                            liveSessionRow
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        if isRunning {
+                            Button {
+                                selectedSession = nil
+                            } label: {
+                                liveSessionRow(isSelected: selectedSession == nil)
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
-                        .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
-                        .listRowBackground(Color.green.opacity(0.06))
-                    }
 
-                    // Past sessions grouped by date
-                    if listModel.sessions.isEmpty && !isRunning {
-                        emptyState
-                            .listRowSeparator(.hidden)
-                            .listRowBackground(Color.clear)
-                    } else {
-                        ForEach(listModel.groupedSessions, id: \.date) { group in
-                            Section(group.date) {
-                                ForEach(group.sessions) { session in
-                                    SessionRow(session: session)
-                                        .tag(session)
-                                        .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+                        if listModel.sessions.isEmpty && !isRunning {
+                            emptyState
+                        } else {
+                            ForEach(listModel.groupedSessions, id: \.date) { group in
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text(group.date)
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(Color.warmTextMuted)
+                                        .padding(.horizontal, 18)
+                                        .padding(.bottom, 2)
+
+                                    ForEach(group.sessions) { session in
+                                        Button {
+                                            selectedSession = session
+                                        } label: {
+                                            SessionRow(
+                                                session: session,
+                                                isSelected: selectedSession?.id == session.id
+                                            )
+                                        }
+                                        .buttonStyle(.plain)
+                                        .padding(.horizontal, 12)
+                                    }
                                 }
                             }
                         }
                     }
+                    .padding(.vertical, 14)
                 }
-                .listStyle(.sidebar)
             }
+        }
+        .background(Color.warmSidebarBg)
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(Color.warmBorder.opacity(0.8))
+                .frame(width: 1)
         }
         .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 380)
     }
 
     // MARK: - Components
 
-    private var liveSessionRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(liveTitle)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
+    private func liveSessionRow(isSelected: Bool) -> some View {
+        SidebarRowContainer(isSelected: isSelected) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(liveTitle)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.warmTextPrimary)
+                    .lineLimit(1)
 
-            HStack(spacing: 6) {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(Color.green)
-                        .frame(width: 6, height: 6)
-                    Text("Recording")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.green)
-                }
+                HStack(spacing: 6) {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 6, height: 6)
+                        Text("Recording")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.green)
+                    }
 
-                if liveWordCount > 0 {
-                    Text("· \(formatWordCount(liveWordCount))")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                    if let startTime = liveStartTime {
+                        Text("· \(formatTime(startTime))")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.warmTextMuted)
+                    }
                 }
             }
         }
-        .padding(.vertical, 4)
+        .padding(.horizontal, 12)
     }
 
     private var emptyState: some View {
@@ -118,13 +140,13 @@ struct SessionListView: View {
             Spacer().frame(height: 40)
             Image(systemName: "waveform")
                 .font(.system(size: 32, weight: .light))
-                .foregroundStyle(.quaternary)
+                .foregroundStyle(Color.warmTextMuted.opacity(0.4))
             Text("No sessions yet")
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.warmTextMuted)
             Text("Tap New Note to start.")
                 .font(.system(size: 12))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Color.warmTextMuted.opacity(0.7))
         }
         .frame(maxWidth: .infinity)
     }
@@ -133,30 +155,31 @@ struct SessionListView: View {
 /// A single row in the session list sidebar.
 struct SessionRow: View {
     let session: SessionSummary
+    let isSelected: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(session.metadata.title)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
+        SidebarRowContainer(isSelected: isSelected) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(session.metadata.title)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
+                    .foregroundStyle(Color.warmTextPrimary)
+                    .lineLimit(1)
 
-            HStack(spacing: 4) {
-                Text(formattedDate)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                HStack(spacing: 4) {
+                    Text(formattedDate)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.warmTextMuted)
 
-                if session.metadata.wordCount > 0 {
                     Text("·")
                         .font(.system(size: 11))
-                        .foregroundStyle(.quaternary)
-                    Text(formatWordCount(session.metadata.wordCount))
+                        .foregroundStyle(Color.warmTextMuted.opacity(0.5))
+                    Text(formatTime(session.metadata.createdAt))
                         .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(Color.warmTextMuted)
                 }
             }
         }
-        .padding(.vertical, 4)
+        .padding(.horizontal, 12)
     }
 
     private var formattedDate: String {
@@ -166,8 +189,29 @@ struct SessionRow: View {
     }
 }
 
-/// Format word count with commas and proper singular/plural.
-func formatWordCount(_ count: Int) -> String {
-    let formatted = NumberFormatter.localizedString(from: NSNumber(value: count), number: .decimal)
-    return "\(formatted) \(count == 1 ? "word" : "words")"
+private struct SidebarRowContainer<Content: View>: View {
+    let isSelected: Bool
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Rectangle()
+                .fill(isSelected ? Color.warmTextPrimary.opacity(0.55) : Color.clear)
+                .frame(width: 2)
+
+            content
+                .padding(.leading, 10)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(isSelected ? Color.warmSelectionBg.opacity(0.45) : Color.clear)
+        .contentShape(Rectangle())
+    }
+}
+
+/// Format a date as a time string like "2:30 PM".
+func formatTime(_ date: Date) -> String {
+    let fmt = DateFormatter()
+    fmt.dateFormat = "h:mm a"
+    return fmt.string(from: date)
 }

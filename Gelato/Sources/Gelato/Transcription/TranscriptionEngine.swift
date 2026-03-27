@@ -29,9 +29,12 @@ final class TranscriptionEngine {
     private let micCapture = MicCapture()
     private let transcriptStore: TranscriptStore
     private var audioRecorder: SessionAudioRecorder?
+    private var currentSessionStart: Date?
 
     /// Audio level from mic for the UI meter.
-    var audioLevel: Float { micCapture.audioLevel }
+    var audioLevel: Float { max(micAudioLevel, systemAudioLevel) }
+    var micAudioLevel: Float { micCapture.audioLevel }
+    var systemAudioLevel: Float { systemCapture.audioLevel }
 
     private var micTask: Task<Void, Never>?
     private var sysTask: Task<Void, Never>?
@@ -45,11 +48,13 @@ final class TranscriptionEngine {
     /// Tracks the resolved mic device ID currently in use.
     private var currentMicDeviceID: AudioDeviceID = 0
 
-    /// Tracks whether user selected "System Default" (0) or a specific device.
+    /// Tracks whether user selected automatic mic selection (0) or a specific device.
     private var userSelectedDeviceID: AudioDeviceID = 0
 
     /// Listens for default input device changes at the OS level.
     private var defaultDeviceListenerBlock: AudioObjectPropertyListenerBlock?
+    /// Listens for default output device changes so the system-audio tap follows speaker swaps.
+    private var defaultOutputDeviceListenerBlock: AudioObjectPropertyListenerBlock?
 
     init(transcriptStore: TranscriptStore) {
         self.transcriptStore = transcriptStore
@@ -58,12 +63,14 @@ final class TranscriptionEngine {
     func start(
         locale: Locale,
         inputDeviceID: AudioDeviceID = 0,
+        sessionStart: Date = .now,
         audioRecorder: SessionAudioRecorder? = nil
     ) async {
         diagLog("[ENGINE-0] start() called, isRunning=\(isRunning)")
         guard !isRunning else { return }
         lastError = nil
         self.audioRecorder = audioRecorder
+        self.currentSessionStart = sessionStart
 
         guard await ensureMicrophonePermission() else { return }
 
@@ -97,35 +104,42 @@ final class TranscriptionEngine {
 
         guard let asrManager, let vadManager else { return }
 
-        // 2. Start mic capture
-        userSelectedDeviceID = inputDeviceID
-        let targetMicID = inputDeviceID > 0 ? inputDeviceID : MicCapture.defaultInputDeviceID()
-        currentMicDeviceID = targetMicID ?? 0
         let audioRecorder = self.audioRecorder
-        diagLog("[ENGINE-3] starting mic capture, targetMicID=\(String(describing: targetMicID))")
-        let micStream = micCapture.bufferStream(
-            deviceID: targetMicID,
-            onBuffer: { buffer in
-                audioRecorder?.appendMicBuffer(buffer)
-            }
-        )
 
-        // 3. Start system audio capture
-        diagLog("[ENGINE-4] starting system audio capture...")
-        let sysStreams: SystemAudioCapture.CaptureStreams?
+        // 2. Start system audio capture first so we fail fast if "Them" audio
+        // can't be captured for this session.
+        diagLog("[ENGINE-3] starting system audio capture")
+        let sysStreams: SystemAudioCapture.CaptureStreams
         do {
             sysStreams = try await systemCapture.bufferStream(
-                onSystemBuffer: { buffer in
-                    audioRecorder?.appendSystemBuffer(buffer)
+                onSystemBuffer: { capturedBuffer in
+                    audioRecorder?.appendSystemBuffer(capturedBuffer)
                 }
             )
-            diagLog("[ENGINE-5] system audio capture started OK")
         } catch {
-            let msg = "Failed to start system audio: \(error.localizedDescription)"
-            diagLog("[ENGINE-5-FAIL] \(msg)")
+            let msg = "System audio capture failed: \(error.localizedDescription)"
+            diagLog("[ENGINE-3-FAIL] \(msg)")
             lastError = msg
-            sysStreams = nil
+            assetStatus = "Ready"
+            isRunning = false
+            return
         }
+
+        // 3. Start mic capture
+        userSelectedDeviceID = inputDeviceID
+        let targetMicID = inputDeviceID > 0 ? inputDeviceID : MicCapture.automaticInputDeviceID()
+        currentMicDeviceID = targetMicID ?? 0
+        if inputDeviceID == 0 {
+            diagLog("[ENGINE-4] automatic mic resolved to \(String(describing: targetMicID)) (\(MicCapture.automaticInputDeviceName() ?? "unknown"))")
+        } else {
+            diagLog("[ENGINE-4] starting mic capture, targetMicID=\(String(describing: targetMicID))")
+        }
+        let micStream = micCapture.bufferStream(
+            deviceID: targetMicID,
+            onBuffer: { capturedBuffer in
+                audioRecorder?.appendMicBuffer(capturedBuffer)
+            }
+        )
 
         // 4. Start mic transcription
         let store = transcriptStore
@@ -133,13 +147,14 @@ final class TranscriptionEngine {
             asrManager: asrManager,
             vadManager: vadManager,
             speaker: .you,
+            sessionStart: sessionStart,
             onPartial: { text in
                 Task { @MainActor in store.volatileYouText = text }
             },
-            onFinal: { text in
+            onFinal: { text, timestamp in
                 Task { @MainActor in
                     store.volatileYouText = ""
-                    store.append(Utterance(text: text, speaker: .you))
+                    store.append(Utterance(text: text, speaker: .you, timestamp: timestamp))
                 }
             }
         )
@@ -148,24 +163,25 @@ final class TranscriptionEngine {
         }
 
         // 5. Start system audio transcription
-        if let sysStream = sysStreams?.systemAudio {
-            let sysTranscriber = StreamingTranscriber(
-                asrManager: asrManager,
-                vadManager: vadManager,
-                speaker: .them,
-                onPartial: { text in
-                    Task { @MainActor in store.volatileThemText = text }
-                },
-                onFinal: { text in
-                    Task { @MainActor in
-                        store.volatileThemText = ""
-                        store.append(Utterance(text: text, speaker: .them))
-                    }
+        let sysTranscriber = StreamingTranscriber(
+            asrManager: asrManager,
+            vadManager: vadManager,
+            speaker: .them,
+            sessionStart: sessionStart,
+            segmentationConfig: Self.systemVadSegmentationConfig,
+            inputGain: Self.systemInputGain,
+            onPartial: { text in
+                Task { @MainActor in store.volatileThemText = text }
+            },
+            onFinal: { text, timestamp in
+                Task { @MainActor in
+                    store.volatileThemText = ""
+                    store.append(Utterance(text: text, speaker: .them, timestamp: timestamp))
                 }
-            )
-            sysTask = Task.detached {
-                await sysTranscriber.run(stream: sysStream)
             }
+        )
+        sysTask = Task.detached {
+            await sysTranscriber.run(stream: sysStreams.systemAudio)
         }
 
         assetStatus = "Transcribing (Parakeet-TDT v2)"
@@ -173,6 +189,7 @@ final class TranscriptionEngine {
 
         // Install CoreAudio listener for default input device changes
         installDefaultDeviceListener()
+        installDefaultOutputDeviceListener()
     }
 
     /// Restart only the mic capture with a new device, keeping system audio and models intact.
@@ -184,7 +201,7 @@ final class TranscriptionEngine {
         if inputDeviceID != 0 || userSelectedDeviceID != 0 {
             userSelectedDeviceID = inputDeviceID
         }
-        let targetMicID = inputDeviceID > 0 ? inputDeviceID : MicCapture.defaultInputDeviceID() ?? 0
+        let targetMicID = inputDeviceID > 0 ? inputDeviceID : MicCapture.automaticInputDeviceID() ?? 0
         guard targetMicID != currentMicDeviceID else {
             diagLog("[ENGINE-MIC-SWAP] same device \(targetMicID), skipping")
             return
@@ -203,8 +220,8 @@ final class TranscriptionEngine {
         let audioRecorder = self.audioRecorder
         let micStream = micCapture.bufferStream(
             deviceID: targetMicID,
-            onBuffer: { buffer in
-                audioRecorder?.appendMicBuffer(buffer)
+            onBuffer: { capturedBuffer in
+                audioRecorder?.appendMicBuffer(capturedBuffer)
             }
         )
         let store = transcriptStore
@@ -212,13 +229,14 @@ final class TranscriptionEngine {
             asrManager: asrManager,
             vadManager: vadManager,
             speaker: .you,
+            sessionStart: currentSessionStart ?? .now,
             onPartial: { text in
                 Task { @MainActor in store.volatileYouText = text }
             },
-            onFinal: { text in
+            onFinal: { text, timestamp in
                 Task { @MainActor in
                     store.volatileYouText = ""
-                    store.append(Utterance(text: text, speaker: .you))
+                    store.append(Utterance(text: text, speaker: .you, timestamp: timestamp))
                 }
             }
         )
@@ -244,11 +262,37 @@ final class TranscriptionEngine {
             guard let self else { return }
             Task { @MainActor in
                 guard self.isRunning, self.userSelectedDeviceID == 0 else { return }
-                // User has "System Default" selected — follow the OS default
+                // User has automatic mic selection enabled, so re-resolve the best input device.
                 self.restartMic(inputDeviceID: 0)
             }
         }
         defaultDeviceListenerBlock = block
+
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            DispatchQueue.main,
+            block
+        )
+    }
+
+    private func installDefaultOutputDeviceListener() {
+        guard defaultOutputDeviceListenerBlock == nil else { return }
+
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.isRunning else { return }
+                await self.restartSystemCapture()
+            }
+        }
+        defaultOutputDeviceListenerBlock = block
 
         AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject),
@@ -274,6 +318,69 @@ final class TranscriptionEngine {
         defaultDeviceListenerBlock = nil
     }
 
+    private func removeDefaultOutputDeviceListener() {
+        guard let block = defaultOutputDeviceListenerBlock else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            DispatchQueue.main,
+            block
+        )
+        defaultOutputDeviceListenerBlock = nil
+    }
+
+    private func restartSystemCapture() async {
+        guard isRunning, let asrManager, let vadManager else { return }
+
+        diagLog("[ENGINE-SYS-SWAP] restarting system capture for output device change")
+        sysTask?.cancel()
+        sysTask = nil
+
+        let audioRecorder = self.audioRecorder
+        await Task.detached(priority: .userInitiated) {
+            await self.systemCapture.stop()
+        }.value
+
+        do {
+            let sysStreams = try await systemCapture.bufferStream(
+                onSystemBuffer: { capturedBuffer in
+                    audioRecorder?.appendSystemBuffer(capturedBuffer)
+                }
+            )
+            let store = transcriptStore
+            let sysTranscriber = StreamingTranscriber(
+                asrManager: asrManager,
+                vadManager: vadManager,
+                speaker: .them,
+                sessionStart: currentSessionStart ?? .now,
+                segmentationConfig: Self.systemVadSegmentationConfig,
+                inputGain: Self.systemInputGain,
+                onPartial: { text in
+                    Task { @MainActor in store.volatileThemText = text }
+                },
+                onFinal: { text, timestamp in
+                    Task { @MainActor in
+                        store.volatileThemText = ""
+                        store.append(Utterance(text: text, speaker: .them, timestamp: timestamp))
+                    }
+                }
+            )
+            sysTask = Task.detached {
+                await sysTranscriber.run(stream: sysStreams.systemAudio)
+            }
+            diagLog("[ENGINE-SYS-SWAP] system capture restarted")
+        } catch {
+            let msg = "System audio capture restart failed: \(error.localizedDescription)"
+            diagLog("[ENGINE-SYS-SWAP-FAIL] \(msg)")
+            lastError = msg
+        }
+    }
+
     private func ensureMicrophonePermission() async -> Bool {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
@@ -296,20 +403,48 @@ final class TranscriptionEngine {
         }
     }
 
-    func stop() {
+    func stop() async {
+        diagLog("[ENGINE-STOP] begin")
         removeDefaultDeviceListener()
-        micTask?.cancel()
-        sysTask?.cancel()
-        micKeepAliveTask?.cancel()
-        micTask = nil
-        sysTask = nil
-        micKeepAliveTask = nil
-        Task { await systemCapture.stop() }
-        micCapture.stop()
-        audioRecorder?.finish()
-        audioRecorder = nil
-        currentMicDeviceID = 0
+        removeDefaultOutputDeviceListener()
+        let micTask = self.micTask
+        let sysTask = self.sysTask
+        self.micKeepAliveTask?.cancel()
+        self.micTask = nil
+        self.sysTask = nil
+        self.micKeepAliveTask = nil
         isRunning = false
         assetStatus = "Ready"
+
+        micCapture.stop()
+        micTask?.cancel()
+        sysTask?.cancel()
+
+        let systemCapture = self.systemCapture
+        let recorder = audioRecorder
+        audioRecorder = nil
+        currentSessionStart = nil
+        currentMicDeviceID = 0
+
+        await Task.detached(priority: .userInitiated) {
+            await systemCapture.stop()
+            _ = recorder?.finish()
+        }.value
+        diagLog("[ENGINE-STOP] recorder finished")
+        diagLog("[ENGINE-STOP] end")
     }
+
+    private static let systemInputGain: Float = 2.5
+
+    private static let systemVadSegmentationConfig = VadSegmentationConfig(
+        minSpeechDuration: 0.12,
+        minSilenceDuration: 0.45,
+        maxSpeechDuration: 14.0,
+        speechPadding: 0.1,
+        silenceThresholdForSplit: 0.25,
+        negativeThreshold: 0.23,
+        negativeThresholdOffset: 0.22,
+        minSilenceAtMaxSpeech: 0.098,
+        useMaxPossibleSilenceAtMaxSpeech: true
+    )
 }

@@ -9,7 +9,8 @@ struct ContentView: View {
     @State private var sessionStore = SessionStore()
     @State private var transcriptLogger = TranscriptLogger()
     @State private var sessionAudioRecorder = SessionAudioRecorder()
-    @State private var audioLevel: Float = 0
+    @State private var micAudioLevel: Float = 0
+    @State private var systemAudioLevel: Float = 0
     @State private var finalizationMessage: String?
     @State private var isProcessingSession = false
     @State private var processingStatus = "Processing session..."
@@ -35,7 +36,7 @@ struct ContentView: View {
                 selectedSession: $selectedSession,
                 isRunning: isRunning,
                 liveTitle: liveSessionTitle,
-                liveWordCount: transcriptStore.utterances.reduce(0) { $0 + $1.text.split(separator: " ").count },
+                liveStartTime: sessionStartTime,
                 onStartSession: startSession
             )
         } detail: {
@@ -46,7 +47,8 @@ struct ContentView: View {
                     transcriptionEngine: transcriptionEngine,
                     settings: settings,
                     liveTitle: $liveSessionTitle,
-                    audioLevel: audioLevel,
+                    micAudioLevel: micAudioLevel,
+                    systemAudioLevel: systemAudioLevel,
                     sessionID: liveSessionID,
                     library: sessionLibrary,
                     onStop: stopSession
@@ -106,13 +108,16 @@ struct ContentView: View {
         }
         .onReceive(Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()) { _ in
             guard let engine = transcriptionEngine else {
-                if audioLevel != 0 { audioLevel = 0 }
+                if micAudioLevel != 0 { micAudioLevel = 0 }
+                if systemAudioLevel != 0 { systemAudioLevel = 0 }
                 return
             }
             if engine.isRunning {
-                audioLevel = engine.audioLevel
-            } else if audioLevel != 0 {
-                audioLevel = 0
+                micAudioLevel = engine.micAudioLevel
+                systemAudioLevel = engine.systemAudioLevel
+            } else {
+                if micAudioLevel != 0 { micAudioLevel = 0 }
+                if systemAudioLevel != 0 { systemAudioLevel = 0 }
             }
         }
     }
@@ -123,20 +128,21 @@ struct ContentView: View {
         VStack(spacing: 12) {
             Image(systemName: "waveform")
                 .font(.system(size: 40, weight: .light))
-                .foregroundStyle(.quaternary)
+                .foregroundStyle(Color.warmTextMuted.opacity(0.3))
             Text("Select a session")
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(.secondary)
+                .font(.gelatoSerif(size: 22, weight: .semibold))
+                .foregroundStyle(Color.warmTextSecondary)
             Text("Or tap New Note to start recording.")
                 .font(.system(size: 13))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Color.warmTextMuted)
             if let finalizationMessage {
                 Text(finalizationMessage)
                     .font(.system(size: 12))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Color.warmTextMuted)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.warmBackground)
     }
 
     private var isRunning: Bool {
@@ -162,17 +168,22 @@ struct ContentView: View {
             await transcriptionEngine?.start(
                 locale: settings.locale,
                 inputDeviceID: settings.inputDeviceID,
+                sessionStart: sessionStartTime ?? Date(),
                 audioRecorder: sessionAudioRecorder
             )
         }
     }
 
     private func stopSession() {
-        transcriptionEngine?.stop()
         let utteranceCount = transcriptStore.utterances.count
         let wordCount = transcriptStore.utterances.reduce(0) { $0 + $1.text.split(separator: " ").count }
         let sessionID = liveSessionID
         var sessionTitle = liveSessionTitle
+        let transcriptionMode = settings.transcriptionMode
+        let openAIAPIKey = settings.openAIAPIKey
+        let sessionLibrary = self.sessionLibrary
+        let sessionStore = self.sessionStore
+        let transcriptLogger = self.transcriptLogger
         let duration: TimeInterval?
         if let start = sessionStartTime {
             duration = Date().timeIntervalSince(start)
@@ -184,27 +195,61 @@ struct ContentView: View {
         processingSessionTitle = sessionTitle
 
         Task {
+            diagLog("[SESSION-STOP] requested for \(sessionID ?? "unknown-session")")
+            await transcriptionEngine?.stop()
+            diagLog("[SESSION-STOP] engine stopped for \(sessionID ?? "unknown-session")")
+
             // Get session URL before ending (which clears it)
             let sessionURL = await sessionStore.currentSessionURL
             var didFinalizeAdvanced = false
 
-            if settings.transcriptionMode == .scribeV2,
+            if let sessionID {
+                processingStatus = "Creating combined audio..."
+                await Task.detached(priority: .userInitiated) {
+                    await SessionFinalizer.generateCombinedAudioIfPossible(
+                        sessionID: sessionID,
+                        library: sessionLibrary
+                    )
+                }.value
+            }
+
+            if transcriptionMode == .openAIDiarize,
                let sessionID,
                let sessionURL {
-                processingStatus = "Processing audio with ElevenLabs Scribe v2..."
-                didFinalizeAdvanced = await finalizeAdvancedTranscript(
-                    sessionID: sessionID,
-                    sessionURL: sessionURL,
-                    sessionTitle: sessionTitle
-                )
+                processingStatus = "Processing audio with OpenAI gpt-4o-transcribe-diarize..."
+                let sessionTitleForFinalization = sessionTitle
+                let result = await Task.detached(priority: .userInitiated) {
+                    await SessionFinalizer.finalizeDiarizedTranscript(
+                        sessionID: sessionID,
+                        sessionURL: sessionURL,
+                        sessionTitle: sessionTitleForFinalization,
+                        apiKey: openAIAPIKey,
+                        library: sessionLibrary,
+                        sessionStore: sessionStore,
+                        transcriptLogger: transcriptLogger
+                    )
+                }.value
+                didFinalizeAdvanced = result.didFinalize
+                if let errorMessage = result.errorMessage {
+                    finalizationMessage = errorMessage
+                }
             }
 
             if let sessionID {
-                processingStatus = "Creating combined audio..."
-                await generateCombinedAudioIfPossible(sessionID: sessionID)
-
                 processingStatus = "Generating title and detailed notes..."
-                if let generatedTitle = await generateNotesIfPossible(sessionID: sessionID, sessionTitle: sessionTitle) {
+                let sessionTitleForNotes = sessionTitle
+                let notesResult = await Task.detached(priority: .userInitiated) {
+                    await SessionFinalizer.generateNotesIfPossible(
+                        sessionID: sessionID,
+                        sessionTitle: sessionTitleForNotes,
+                        apiKey: openAIAPIKey,
+                        library: sessionLibrary
+                    )
+                }.value
+                if let errorMessage = notesResult.errorMessage {
+                    finalizationMessage = errorMessage
+                }
+                if let generatedTitle = notesResult.generatedTitle {
                     sessionTitle = generatedTitle
                     processingSessionTitle = generatedTitle
                 }
@@ -235,7 +280,7 @@ struct ContentView: View {
             }
             isProcessingSession = false
             processingStatus = "Processing session..."
-            if didFinalizeAdvanced || settings.transcriptionMode != .scribeV2 {
+            if didFinalizeAdvanced || transcriptionMode != .openAIDiarize {
                 finalizationMessage = nil
             }
         }
@@ -274,6 +319,7 @@ struct ContentView: View {
         guard !utterances.isEmpty else { return nil }
 
         let transcript = formattedTranscript(from: utterances)
+        let userNotes = await sessionLibrary.loadNotes(for: sessionID)
         let service = OpenAINotesService()
 
         do {
@@ -281,6 +327,7 @@ struct ContentView: View {
             let generated = try await service.generateNotes(
                 apiKey: settings.openAIAPIKey,
                 sessionTitle: sessionTitle,
+                userNotes: userNotes,
                 transcript: transcript
             )
             await sessionLibrary.upsertGeneratedNotes(for: sessionID, text: generated.notes)
@@ -295,13 +342,19 @@ struct ContentView: View {
 
     private func generateCombinedAudioIfPossible(sessionID: String) async {
         guard let audioFiles = await sessionLibrary.audioFiles(for: sessionID) else { return }
+        let audioTiming = await sessionLibrary.audioTiming(for: sessionID)
         let outputURL = await sessionLibrary.combinedAudioOutputURL(for: sessionID)
 
         do {
+            diagLog(
+                "[AUDIO] creating combined audio for \(sessionID) " +
+                "mic=\(audioFiles.micURL != nil) system=\(audioFiles.systemURL != nil)"
+            )
             _ = try await SessionAudioMixer.createCombinedAudio(
                 micURL: audioFiles.micURL,
                 systemURL: audioFiles.systemURL,
-                outputURL: outputURL
+                outputURL: outputURL,
+                audioTiming: audioTiming
             )
             diagLog("[AUDIO] combined audio created for \(sessionID)")
         } catch {
@@ -309,18 +362,54 @@ struct ContentView: View {
         }
     }
 
-    private func finalizeAdvancedTranscript(sessionID: String, sessionURL: URL, sessionTitle: String) async -> Bool {
-        let audioFiles = await sessionLibrary.audioFiles(for: sessionID)
-        let service = ElevenLabsScribeService()
+    private func finalizeDiarizedTranscript(sessionID: String, sessionURL: URL, sessionTitle: String) async -> Bool {
+        guard let audioFiles = await sessionLibrary.audioFiles(for: sessionID) else {
+            return false
+        }
+
+        let audioTiming = await sessionLibrary.audioTiming(for: sessionID)
+        let liveUtterances = await sessionLibrary.loadTranscript(for: sessionID)
+        let combinedStart = combinedAudioStartDate(audioTiming: audioTiming, sessionID: sessionID)
+        let knownSpeakers = await OpenAISpeakerReferenceBuilder.buildReferences(
+            audioFiles: audioFiles,
+            audioTiming: audioTiming,
+            liveUtterances: liveUtterances
+        )
+        let service = OpenAIDiarizedTranscriptionService()
 
         do {
-            async let micResponse = transcribeIfPresent(audioFiles?.micURL, service: service)
-            async let systemResponse = transcribeIfPresent(audioFiles?.systemURL, service: service)
-
-            let utterances = try await mergeAdvancedUtterances(
+            let uploadURL = await diarizationUploadURL(
                 sessionID: sessionID,
-                micResponse: micResponse,
-                systemResponse: systemResponse
+                audioFiles: audioFiles,
+                audioTiming: audioTiming
+            )
+            guard let uploadURL else { return false }
+
+            diagLog("[OPENAI] uploading \(uploadURL.lastPathComponent) for \(sessionID)")
+            let response: OpenAIDiarizedTranscriptResponse
+            if uploadURL.path.contains("GelatoOpenAIUploads") {
+                response = try await { () async throws -> OpenAIDiarizedTranscriptResponse in
+                    defer { try? FileManager.default.removeItem(at: uploadURL) }
+                    return try await service.transcribe(
+                        audioURL: uploadURL,
+                        apiKey: settings.openAIAPIKey,
+                        knownSpeakers: knownSpeakers
+                    )
+                }()
+            } else {
+                response = try await service.transcribe(
+                    audioURL: uploadURL,
+                    apiKey: settings.openAIAPIKey,
+                    knownSpeakers: knownSpeakers
+                )
+            }
+
+            let speakerSummary = Set((response.segments ?? []).map(\.speaker)).sorted().joined(separator: ",")
+            diagLog("[OPENAI] \(sessionID) textLength=\(response.text.count) segments=\(response.segments?.count ?? 0) speakers=[\(speakerSummary)]")
+            let utterances = diarizedUtterances(
+                from: response,
+                sessionStart: combinedStart,
+                liveUtterances: liveUtterances
             )
             guard !utterances.isEmpty else { return false }
 
@@ -340,81 +429,161 @@ struct ContentView: View {
             )
             return true
         } catch {
+            diagLog("[OPENAI-FAIL] \(sessionID): \(error.localizedDescription)")
             finalizationMessage = error.localizedDescription
             return false
         }
     }
 
-    private func transcribeIfPresent(
-        _ url: URL?,
-        service: ElevenLabsScribeService
-    ) async throws -> ScribeTranscriptResponse? {
-        guard let url else { return nil }
-        return try await service.transcribe(audioURL: url, apiKey: settings.elevenLabsAPIKey)
-    }
-
-    private func mergeAdvancedUtterances(
+    private func diarizationUploadURL(
         sessionID: String,
-        micResponse: ScribeTranscriptResponse?,
-        systemResponse: ScribeTranscriptResponse?
-    ) async throws -> [Utterance] {
-        let startDate = SessionMetadataIO.parseDate(from: sessionID) ?? Date()
-        let micUtterances = utterances(from: micResponse, speaker: .you, sessionStart: startDate)
-        let systemUtterances = utterances(from: systemResponse, speaker: .them, sessionStart: startDate)
-        return (micUtterances + systemUtterances).sorted { $0.timestamp < $1.timestamp }
-    }
-
-    private func utterances(
-        from response: ScribeTranscriptResponse?,
-        speaker: Speaker,
-        sessionStart: Date
-    ) -> [Utterance] {
-        guard let words = response?.words, !words.isEmpty else {
-            let fallback = response?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !fallback.isEmpty else { return [] }
-            return [Utterance(text: fallback, speaker: speaker, timestamp: sessionStart)]
+        audioFiles: SessionAudioFiles,
+        audioTiming: SessionAudioTiming?
+    ) async -> URL? {
+        if let combinedURL = audioFiles.combinedURL {
+            return combinedURL
         }
 
-        var results: [Utterance] = []
-        var currentText = ""
-        var currentStart: Double?
-        var previousEnd: Double?
+        do {
+            let uploadURL = try await OpenAIDiarizationInputBuilder.buildUploadFile(
+                audioFiles: audioFiles,
+                audioTiming: audioTiming,
+                sessionID: sessionID
+            )
 
-        func flush() {
-            let trimmed = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return }
-            let timestamp = sessionStart.addingTimeInterval(currentStart ?? 0)
-            results.append(Utterance(text: trimmed, speaker: speaker, timestamp: timestamp))
-            currentText = ""
-            currentStart = nil
-            previousEnd = nil
-        }
-
-        for word in words {
-            if let start = word.start,
-               let previousEnd,
-               start - previousEnd > 1.2 {
-                flush()
+            if let uploadURL {
+                diagLog("[OPENAI-UPLOAD] built fallback upload file for \(sessionID): \(uploadURL.lastPathComponent)")
+            } else {
+                diagLog("[OPENAI-UPLOAD] no upload file available for \(sessionID)")
             }
 
-            if word.type == "audio_event" {
+            return uploadURL
+        } catch {
+            diagLog("[OPENAI-UPLOAD-FAIL] \(sessionID): \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func diarizedUtterances(
+        from response: OpenAIDiarizedTranscriptResponse,
+        sessionStart: Date,
+        liveUtterances: [Utterance]
+    ) -> [Utterance] {
+        guard let segments = response.segments, !segments.isEmpty else { return [] }
+
+        let inferredSpeakers = inferredSpeakerMap(
+            for: segments,
+            sessionStart: sessionStart,
+            liveUtterances: liveUtterances
+        )
+
+        return segments.compactMap { segment in
+            let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+
+            let speakerKey = normalizedSpeakerKey(segment.speaker)
+            let speaker = explicitSpeaker(for: speakerKey)
+                ?? inferredSpeakers[speakerKey]
+                ?? nearestLiveSpeaker(
+                    to: sessionStart.addingTimeInterval((segment.start + segment.end) / 2),
+                    liveUtterances: liveUtterances
+                )
+                ?? .them
+
+            return Utterance(
+                text: text,
+                speaker: speaker,
+                timestamp: sessionStart.addingTimeInterval(max(0, segment.start))
+            )
+        }
+        .chronologicallySorted
+    }
+
+    private func inferredSpeakerMap(
+        for segments: [OpenAIDiarizedSegment],
+        sessionStart: Date,
+        liveUtterances: [Utterance]
+    ) -> [String: Speaker] {
+        let explicitSpeakers = Set(segments.compactMap { explicitSpeaker(for: normalizedSpeakerKey($0.speaker)) })
+        let genericLabels = Array(Set(segments.map { normalizedSpeakerKey($0.speaker) }.filter {
+            explicitSpeaker(for: $0) == nil
+        }))
+
+        guard !genericLabels.isEmpty else { return [:] }
+
+        var scores: [String: [Speaker: Int]] = [:]
+        for segment in segments {
+            let label = normalizedSpeakerKey(segment.speaker)
+            guard explicitSpeaker(for: label) == nil else { continue }
+            guard let liveSpeaker = nearestLiveSpeaker(
+                to: sessionStart.addingTimeInterval((segment.start + segment.end) / 2),
+                liveUtterances: liveUtterances
+            ) else {
                 continue
             }
-
-            if currentStart == nil {
-                currentStart = word.start ?? 0
-            }
-            currentText.append(word.text)
-            previousEnd = word.end ?? previousEnd
-
-            let trimmed = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.hasSuffix(".") || trimmed.hasSuffix("!") || trimmed.hasSuffix("?") {
-                flush()
-            }
+            scores[label, default: [:]][liveSpeaker, default: 0] += 1
         }
 
-        flush()
-        return results
+        if genericLabels.count == 1,
+           let label = genericLabels.first {
+            if explicitSpeakers.count == 1, let explicitSpeaker = explicitSpeakers.first {
+                return [label: explicitSpeaker == .you ? .them : .you]
+            }
+
+            let labelScores = scores[label] ?? [:]
+            let youScore = labelScores[.you, default: 0]
+            let themScore = labelScores[.them, default: 0]
+            return [label: youScore >= themScore ? .you : .them]
+        }
+
+        let sortedLabels = genericLabels.sorted { lhs, rhs in
+            speakerScoreDelta(for: lhs, scores: scores) > speakerScoreDelta(for: rhs, scores: scores)
+        }
+
+        var mapping: [String: Speaker] = [:]
+        for (index, label) in sortedLabels.enumerated() {
+            mapping[label] = index == 0 ? .you : .them
+        }
+        return mapping
+    }
+
+    private func nearestLiveSpeaker(to timestamp: Date, liveUtterances: [Utterance]) -> Speaker? {
+        guard let nearest = liveUtterances.min(by: {
+            abs($0.timestamp.timeIntervalSince(timestamp)) < abs($1.timestamp.timeIntervalSince(timestamp))
+        }) else {
+            return nil
+        }
+
+        let distance = abs(nearest.timestamp.timeIntervalSince(timestamp))
+        return distance <= 4 ? nearest.speaker : nil
+    }
+
+    private func speakerScoreDelta(for label: String, scores: [String: [Speaker: Int]]) -> Int {
+        let labelScores = scores[label] ?? [:]
+        return labelScores[.you, default: 0] - labelScores[.them, default: 0]
+    }
+
+    private func explicitSpeaker(for normalizedSpeaker: String) -> Speaker? {
+        switch normalizedSpeaker {
+        case "you":
+            return .you
+        case "them":
+            return .them
+        default:
+            return nil
+        }
+    }
+
+    private func normalizedSpeakerKey(_ rawSpeaker: String) -> String {
+        rawSpeaker
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
+    private func combinedAudioStartDate(audioTiming: SessionAudioTiming?, sessionID: String) -> Date {
+        [audioTiming?.micFirstBufferAt, audioTiming?.systemFirstBufferAt]
+            .compactMap { $0 }
+            .min() ?? (SessionMetadataIO.parseDate(from: sessionID) ?? Date())
     }
 
     private func formattedTranscript(from utterances: [Utterance]) -> String {

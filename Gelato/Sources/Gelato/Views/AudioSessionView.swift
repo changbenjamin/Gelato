@@ -10,7 +10,7 @@ struct AudioSessionCard: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Session Audio")
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.warmTextMuted)
 
             if let audioFiles {
                 AudioFileCard(
@@ -21,11 +21,12 @@ struct AudioSessionCard: View {
             } else {
                 Text("Audio will appear here once the session recording is available.")
                     .font(.system(size: 12))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Color.warmTextMuted)
             }
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 18)
+        .background(Color.warmBackground)
         .task {
             audioFiles = await library.audioFiles(for: sessionID)
         }
@@ -41,11 +42,12 @@ private struct AudioFileCard: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title)
                 .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Color.warmTextPrimary)
 
             if let subtitle {
                 Text(subtitle)
                     .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.warmTextMuted)
             }
 
             if let fileURL {
@@ -66,17 +68,21 @@ private struct AudioFileCard: View {
 
                 Text(fileURL.lastPathComponent)
                     .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.warmTextMuted)
                     .textSelection(.enabled)
             } else {
                 Text("Not available")
                     .font(.system(size: 12))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Color.warmTextMuted)
             }
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.primary.opacity(0.035))
+        .background(Color.warmCardBg)
+        .overlay {
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(Color.warmBorder, lineWidth: 1)
+        }
         .clipShape(RoundedRectangle(cornerRadius: 14))
     }
 

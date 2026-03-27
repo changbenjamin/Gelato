@@ -22,6 +22,8 @@
     <string>15.0</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Gelato needs microphone access to transcribe your voice in real-time during conversations.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Gelato needs audio capture access to transcribe the system audio from the other side of your calls.</string>
     <key>NSScreenCaptureUsageDescription</key>
     <string>Gelato needs screen capture permission to capture system audio from other participants.</string>
     <key>LSApplicationCategoryType</key>

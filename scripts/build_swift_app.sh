@@ -18,6 +18,7 @@ ROOT_DIR="$(pwd)"
 SWIFT_DIR="$ROOT_DIR/Gelato"
 APP_NAME="Gelato"
 BUNDLE_ID="com.gelato.app"
+APP_INSTALL_PATH="/Applications/$APP_NAME.app"
 
 echo "=== Building $APP_NAME (Swift) ==="
 
@@ -131,9 +132,33 @@ else
   echo "Warning: No signing identity found. App will be unsigned."
 fi
 
+# Stop the installed app before replacing its bundle so we always relaunch the
+# exact binary the user will test.
+if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
+  echo "Stopping running $APP_NAME"
+  pkill -TERM -x "$APP_NAME" >/dev/null 2>&1 || true
+  for _ in {1..20}; do
+    if ! pgrep -x "$APP_NAME" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.5
+  done
+  if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
+    echo "Force quitting $APP_NAME"
+    pkill -KILL -x "$APP_NAME" >/dev/null 2>&1 || true
+    for _ in {1..20}; do
+      if ! pgrep -x "$APP_NAME" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.5
+    done
+  fi
+fi
+
 # Install to /Applications
+rm -rf "$APP_INSTALL_PATH"
 cp -R "$APP_DIR" /Applications/
-echo "Installed to /Applications/$APP_NAME.app"
+echo "Installed to $APP_INSTALL_PATH"
 
 # Sync local .env into Application Support so the packaged app can read it.
 APP_SUPPORT_DIR="$HOME/Library/Application Support/Gelato"
@@ -142,5 +167,8 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
   cp "$ROOT_DIR/.env" "$APP_SUPPORT_DIR/.env"
   echo "Synced .env to $APP_SUPPORT_DIR/.env"
 fi
+
+open -a "$APP_INSTALL_PATH"
+echo "Relaunched $APP_INSTALL_PATH"
 
 echo "=== Build complete ==="

@@ -2,7 +2,9 @@ import Foundation
 
 enum TranscriptionMode: String, CaseIterable, Identifiable, Codable, Sendable {
     case parakeet
-    case scribeV2
+    case openAIDiarize
+
+    static let legacyElevenLabsRawValue = "scribeV2"
 
     var id: String { rawValue }
 
@@ -10,8 +12,8 @@ enum TranscriptionMode: String, CaseIterable, Identifiable, Codable, Sendable {
         switch self {
         case .parakeet:
             return "Parakeet (Local)"
-        case .scribeV2:
-            return "ElevenLabs Scribe v2"
+        case .openAIDiarize:
+            return "OpenAI Diarized Transcript"
         }
     }
 
@@ -19,8 +21,8 @@ enum TranscriptionMode: String, CaseIterable, Identifiable, Codable, Sendable {
         switch self {
         case .parakeet:
             return "Live local transcription with Parakeet-TDT v2."
-        case .scribeV2:
-            return "Show a live local transcript while recording, then replace the saved transcript with ElevenLabs Scribe v2."
+        case .openAIDiarize:
+            return "Show a live local transcript while recording, then replace the saved transcript with OpenAI gpt-4o-transcribe-diarize using two-speaker diarization."
         }
     }
 }

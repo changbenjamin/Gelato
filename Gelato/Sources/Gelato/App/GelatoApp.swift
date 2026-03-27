@@ -6,10 +6,18 @@ import Sparkle
 struct GelatoApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var settings = AppSettings()
-    private let updaterController: SPUStandardUpdaterController
+    private let updaterController: SPUStandardUpdaterController?
 
     init() {
-        updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        if Self.canUseSparkleUpdater {
+            updaterController = SPUStandardUpdaterController(
+                startingUpdater: true,
+                updaterDelegate: nil,
+                userDriverDelegate: nil
+            )
+        } else {
+            updaterController = nil
+        }
     }
 
     var body: some Scene {
@@ -22,13 +30,19 @@ struct GelatoApp: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 900, height: 600)
         .commands {
-            CommandGroup(after: .appInfo) {
-                CheckForUpdatesView(updater: updaterController.updater)
+            if let updater = updaterController?.updater {
+                CommandGroup(after: .appInfo) {
+                    CheckForUpdatesView(updater: updater)
+                }
             }
         }
         Settings {
-            SettingsView(settings: settings, updater: updaterController.updater)
+            SettingsView(settings: settings, updater: updaterController?.updater)
         }
+    }
+
+    private static var canUseSparkleUpdater: Bool {
+        Bundle.main.bundleURL.pathExtension == "app"
     }
 }
 
@@ -39,7 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let hidden = UserDefaults.standard.object(forKey: "hideFromScreenShare") == nil
-            ? true
+            ? false
             : UserDefaults.standard.bool(forKey: "hideFromScreenShare")
         let sharingType: NSWindow.SharingType = hidden ? .none : .readOnly
 
@@ -55,7 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { _ in
             Task { @MainActor in
                 let hide = UserDefaults.standard.object(forKey: "hideFromScreenShare") == nil
-                    ? true
+                    ? false
                     : UserDefaults.standard.bool(forKey: "hideFromScreenShare")
                 let type: NSWindow.SharingType = hide ? .none : .readOnly
                 for window in NSApp.windows {

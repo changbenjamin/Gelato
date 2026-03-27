@@ -13,11 +13,12 @@ struct NotesView: View {
     var body: some View {
         VStack(spacing: 0) {
             MarkdownTextView(text: $text, placeholder: "Write notes...")
-                .background(Color(nsColor: .windowBackgroundColor))
+                .padding(20)
+                .background(Color.warmBackground)
         }
         .task {
             let loaded = await library.loadNotes(for: sessionID)
-            text = loaded
+            text = MarkdownListNormalizer.normalize(loaded)
             isLoaded = true
         }
         .onChange(of: text) {
@@ -45,6 +46,12 @@ private struct MarkdownTextView: NSViewRepresentable {
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
+        scrollView.wantsLayer = true
+        scrollView.layer?.cornerRadius = 18
+        scrollView.layer?.masksToBounds = true
+        scrollView.layer?.backgroundColor = NSColor(Color.warmCardBg).cgColor
+        scrollView.layer?.borderColor = NSColor(Color.warmBorder).cgColor
+        scrollView.layer?.borderWidth = 1
 
         let textView = PlaceholderTextView()
         textView.delegate = context.coordinator
@@ -95,17 +102,49 @@ private struct MarkdownTextView: NSViewRepresentable {
         @MainActor
         func textDidChange(_ notification: Notification) {
             guard let textView, !isApplying else { return }
-            text = textView.string
+            let normalized = MarkdownListNormalizer.normalize(textView.string)
+            if normalized != textView.string {
+                let selectedRanges = textView.selectedRanges
+                isApplying = true
+                textView.string = normalized
+                textView.selectedRanges = selectedRanges
+                isApplying = false
+            }
+            text = normalized
             style(textView: textView)
+        }
+
+        @MainActor
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let textView = notification.object as? PlaceholderTextView, !isApplying else { return }
+            updateTypingAttributes(for: textView)
         }
 
         @MainActor
         func applyText(_ string: String) {
             guard let textView else { return }
+            let normalized = MarkdownListNormalizer.normalize(string)
             isApplying = true
-            textView.string = string
+            textView.string = normalized
             style(textView: textView)
             isApplying = false
+        }
+
+        @MainActor
+        func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            guard let textView = textView as? PlaceholderTextView else { return false }
+
+            switch commandSelector {
+            case #selector(NSResponder.insertTab(_:)):
+                return adjustIndentation(in: textView, delta: 1)
+            case #selector(NSResponder.insertBacktab(_:)):
+                return adjustIndentation(in: textView, delta: -1)
+            case #selector(NSResponder.insertNewline(_:)),
+                 #selector(NSResponder.insertLineBreak(_:)):
+                return continueList(in: textView)
+            default:
+                return false
+            }
         }
 
         @MainActor
@@ -116,31 +155,165 @@ private struct MarkdownTextView: NSViewRepresentable {
 
             textView.textStorage?.setAttributedString(attributed)
             textView.selectedRanges = selectedRanges
+            updateTypingAttributes(for: textView)
             textView.needsDisplay = true
+        }
+
+        @MainActor
+        private func adjustIndentation(in textView: PlaceholderTextView, delta: Int) -> Bool {
+            let selectedRange = textView.selectedRange()
+            guard selectedRange.location != NSNotFound else { return false }
+
+            let nsText = textView.string as NSString
+            let lineRange = nsText.lineRange(for: selectedRange)
+            let contentRange = lineContentRange(for: lineRange, in: nsText)
+            let rawLine = nsText.substring(with: contentRange)
+
+            guard let item = EditorListItem(rawLine: rawLine) else { return false }
+
+            let newIndentSpaces = max(0, item.indentSpaces + (delta * MarkdownListNormalizer.indentWidth))
+            guard newIndentSpaces != item.indentSpaces else { return true }
+
+            let newLine = item.line(withIndentSpaces: newIndentSpaces)
+            let updatedText = nsText.replacingCharacters(in: contentRange, with: newLine)
+
+            let caretOffset = max(0, selectedRange.location - contentRange.location)
+            let newCaretLocation = contentRange.location + min(
+                newLine.utf16.count,
+                max(0, caretOffset + ((newIndentSpaces - item.indentSpaces)))
+            )
+
+            commitEdit(
+                in: textView,
+                text: updatedText,
+                selectedRange: NSRange(location: newCaretLocation, length: selectedRange.length)
+            )
+            return true
+        }
+
+        @MainActor
+        private func continueList(in textView: PlaceholderTextView) -> Bool {
+            let selectedRange = textView.selectedRange()
+            guard selectedRange.location != NSNotFound else { return false }
+
+            let nsText = textView.string as NSString
+            let lineRange = nsText.lineRange(for: selectedRange)
+            let contentRange = lineContentRange(for: lineRange, in: nsText)
+            let rawLine = nsText.substring(with: contentRange)
+
+            guard let item = EditorListItem(rawLine: rawLine) else { return false }
+
+            if item.isEffectivelyEmpty {
+                let updatedText = nsText.replacingCharacters(in: contentRange, with: "")
+                commitEdit(
+                    in: textView,
+                    text: updatedText,
+                    selectedRange: NSRange(location: contentRange.location, length: 0)
+                )
+                return true
+            }
+
+            let insertion = "\n" + item.continuationPrefix
+            let updatedText = nsText.replacingCharacters(in: selectedRange, with: insertion)
+            let newCursorLocation = selectedRange.location + insertion.utf16.count
+
+            commitEdit(
+                in: textView,
+                text: updatedText,
+                selectedRange: NSRange(location: newCursorLocation, length: 0)
+            )
+            return true
+        }
+
+        @MainActor
+        private func commitEdit(
+            in textView: PlaceholderTextView,
+            text newText: String,
+            selectedRange: NSRange
+        ) {
+            let normalized = MarkdownListNormalizer.normalize(newText)
+            isApplying = true
+            textView.string = normalized
+            text = normalized
+            style(textView: textView)
+            textView.setSelectedRange(selectedRange)
+            updateTypingAttributes(for: textView)
+            isApplying = false
+        }
+
+        @MainActor
+        private func updateTypingAttributes(for textView: PlaceholderTextView) {
+            var typingAttributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 14, weight: .regular),
+                .foregroundColor: NSColor(Color.readingText)
+            ]
+
+            guard let textStorage = textView.textStorage else {
+                textView.typingAttributes = typingAttributes
+                return
+            }
+
+            let selectedRange = textView.selectedRange()
+            let text = textView.string as NSString
+
+            if textStorage.length > 0 {
+                let attributeIndex = min(max(selectedRange.location - 1, 0), textStorage.length - 1)
+                let existingAttributes = textStorage.attributes(at: attributeIndex, effectiveRange: nil)
+                if let paragraphStyle = existingAttributes[.paragraphStyle] {
+                    typingAttributes[.paragraphStyle] = paragraphStyle
+                }
+            }
+
+            let clampedLocation = min(max(selectedRange.location, 0), text.length)
+            if text.length > 0 {
+                let lineAnchor = min(clampedLocation, max(text.length - 1, 0))
+                let lineRange = text.lineRange(for: NSRange(location: lineAnchor, length: 0))
+                let rawLine = text.substring(with: lineContentRange(for: lineRange, in: text))
+                let trimmedLine = rawLine.trimmingCharacters(in: .newlines)
+
+                if trimmedLine.hasPrefix("# ") {
+                    typingAttributes[.font] = NSFont.systemFont(ofSize: 18, weight: .bold)
+                } else if trimmedLine.hasPrefix("## ") {
+                    typingAttributes[.font] = NSFont.systemFont(ofSize: 16, weight: .bold)
+                } else if trimmedLine.hasPrefix("### ") {
+                    typingAttributes[.font] = NSFont.systemFont(ofSize: 14, weight: .semibold)
+                } else if trimmedLine.hasPrefix("> ") {
+                    typingAttributes[.foregroundColor] = NSColor(Color.readingText.opacity(0.68))
+                }
+            }
+
+            textView.typingAttributes = typingAttributes
+        }
+
+        private func lineContentRange(for lineRange: NSRange, in text: NSString) -> NSRange {
+            var length = lineRange.length
+
+            while length > 0 {
+                let scalar = text.character(at: lineRange.location + length - 1)
+                if scalar == 10 || scalar == 13 {
+                    length -= 1
+                } else {
+                    break
+                }
+            }
+
+            return NSRange(location: lineRange.location, length: length)
         }
     }
 }
 
 private final class PlaceholderTextView: NSTextView {
-    private enum ListMetrics {
-        static let indentStep: CGFloat = 24
-        static let markerGap: CGFloat = 10
-        static let topLevelMarkerWidth: CGFloat = 12
-        static let nestedMarkerWidth: CGFloat = 10
-    }
-
     var placeholder: String = ""
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-
         drawCustomBullets(in: dirtyRect)
 
         guard string.isEmpty, !placeholder.isEmpty else { return }
 
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 14, weight: .regular),
-            .foregroundColor: NSColor.secondaryLabelColor
+            .foregroundColor: NSColor(Color.warmTextMuted)
         ]
 
         let inset = textContainerInset
@@ -154,60 +327,209 @@ private final class PlaceholderTextView: NSTextView {
     }
 
     private func drawCustomBullets(in dirtyRect: NSRect) {
-        guard let layoutManager, let textContainer else { return }
+        guard let layoutManager else { return }
 
         let nsText = string as NSString
         var location = 0
 
         while location < nsText.length {
             let lineRange = nsText.lineRange(for: NSRange(location: location, length: 0))
-            let rawLine = nsText.substring(with: lineRange)
-            let trimmedLine = rawLine.trimmingCharacters(in: .newlines)
+            let contentRange = lineContentRange(for: lineRange, in: nsText)
+            let rawLine = nsText.substring(with: contentRange)
             let indentSpaces = rawLine.prefix { $0 == " " }.count
-            let indentLevel = indentSpaces / 2
+            let content = String(rawLine.dropFirst(indentSpaces))
 
-            if trimmedLine.hasPrefix("- ") || trimmedLine.hasPrefix("* ") {
-                let glyphRange = layoutManager.glyphRange(forCharacterRange: lineRange, actualCharacterRange: nil)
-                let lineRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
-
-                if dirtyRect.intersects(lineRect) {
-                    let origin = textContainerOrigin
-                    let baseIndent = CGFloat(indentLevel) * ListMetrics.indentStep
-                    let markerX = origin.x + baseIndent + 2
-                    let markerY = origin.y + lineRect.minY + (lineRect.height / 2)
-                    drawBullet(level: indentLevel, at: NSPoint(x: markerX, y: markerY))
-                }
+            guard let marker = content.first,
+                  MarkdownListNormalizer.isBullet(marker),
+                  content.dropFirst().first == " " else {
+                location = NSMaxRange(lineRange)
+                continue
             }
+
+            let bulletCharacterRange = NSRange(location: contentRange.location + indentSpaces, length: 1)
+            let glyphIndex = layoutManager.glyphIndexForCharacter(at: bulletCharacterRange.location)
+            let lineRect = layoutManager.lineFragmentRect(
+                forGlyphAt: glyphIndex,
+                effectiveRange: nil,
+                withoutAdditionalLayout: true
+            )
+
+            let origin = textContainerOrigin
+            let indentLevel = indentSpaces / MarkdownListNormalizer.indentWidth
+            let textStartX = origin.x
+                + CGFloat(indentLevel) * MarkdownListLayoutMetrics.indentStep
+                + MarkdownListLayoutMetrics.bulletMarkerWidth
+                + MarkdownListLayoutMetrics.markerGap
+            let markerY = origin.y + lineRect.midY
+            drawBullet(marker: marker, textStartX: textStartX, centerY: markerY)
 
             location = NSMaxRange(lineRange)
         }
     }
 
-    private func drawBullet(level: Int, at point: NSPoint) {
-        let color = NSColor.secondaryLabelColor
+    private func drawBullet(marker: Character, textStartX: CGFloat, centerY: CGFloat) {
+        let color = NSColor(Color.warmTextMuted)
 
-        if level == 0 {
-            let rect = NSRect(x: point.x, y: point.y - 3.5, width: 7, height: 7)
+        switch marker {
+        case "•":
+            let size: CGFloat = 4.6
+            let rect = NSRect(
+                x: textStartX - MarkdownListLayoutMetrics.bulletToTextGap - size,
+                y: centerY - (size / 2),
+                width: size,
+                height: size
+            )
             color.setFill()
             NSBezierPath(ovalIn: rect).fill()
-        } else {
-            let path = NSBezierPath()
-            path.move(to: NSPoint(x: point.x + 1, y: point.y))
-            path.line(to: NSPoint(x: point.x + 9, y: point.y))
-            path.lineWidth = 1.4
-            path.lineCapStyle = .round
+        case "◦":
+            let size: CGFloat = 3.9
+            let rect = NSRect(
+                x: textStartX - MarkdownListLayoutMetrics.bulletToTextGap - size,
+                y: centerY - (size / 2),
+                width: size,
+                height: size
+            )
             color.setStroke()
+            let path = NSBezierPath(ovalIn: rect)
+            path.lineWidth = 1.0
             path.stroke()
+        case "▪":
+            let size: CGFloat = 3.9
+            let rect = NSRect(
+                x: textStartX - MarkdownListLayoutMetrics.bulletToTextGap - size,
+                y: centerY - (size / 2),
+                width: size,
+                height: size
+            )
+            color.setFill()
+            NSBezierPath(rect: rect).fill()
+        default:
+            break
+        }
+    }
+
+    private func lineContentRange(for lineRange: NSRange, in text: NSString) -> NSRange {
+        var length = lineRange.length
+
+        while length > 0 {
+            let scalar = text.character(at: lineRange.location + length - 1)
+            if scalar == 10 || scalar == 13 {
+                length -= 1
+            } else {
+                break
+            }
+        }
+
+        return NSRange(location: lineRange.location, length: length)
+    }
+}
+
+private enum MarkdownListLayoutMetrics {
+    static let indentStep: CGFloat = 24
+    static let markerGap: CGFloat = 8
+    static let bulletMarkerWidth: CGFloat = 11
+    static let bulletToTextGap: CGFloat = 7
+    static let numberedMarkerBaseWidth: CGFloat = 14
+}
+
+private enum MarkdownListNormalizer {
+    static let indentWidth = 2
+    private static let bulletCycle = ["•", "◦", "▪"]
+
+    static func normalize(_ text: String) -> String {
+        guard !text.isEmpty else { return text }
+
+        let lines = text.components(separatedBy: .newlines)
+        return lines.map(normalize(line:)).joined(separator: "\n")
+    }
+
+    private static func normalize(line: String) -> String {
+        let indentSpaces = line.prefix { $0 == " " }.count
+        let indent = String(repeating: " ", count: indentSpaces)
+        let content = String(line.dropFirst(indentSpaces))
+        let indentLevel = indentSpaces / indentWidth
+
+        if let first = content.first,
+           ["-", "*", "•", "◦", "▪"].contains(first),
+           content.dropFirst().first == " " {
+            return indent + bullet(for: indentLevel) + " " + content.dropFirst(2)
+        }
+
+        return line
+    }
+
+    static func bullet(for indentLevel: Int) -> String {
+        bulletCycle[indentLevel % bulletCycle.count]
+    }
+
+    static func isBullet(_ character: Character) -> Bool {
+        ["•", "◦", "▪"].contains(character)
+    }
+}
+
+private struct EditorListItem {
+    let indentSpaces: Int
+    let kind: Kind
+    let content: String
+
+    enum Kind {
+        case bullet
+        case numbered(Int)
+    }
+
+    init?(rawLine: String) {
+        let indentSpaces = rawLine.prefix { $0 == " " }.count
+        let contentStart = String(rawLine.dropFirst(indentSpaces))
+        self.indentSpaces = indentSpaces
+
+        if let first = contentStart.first,
+           ["•", "◦", "▪", "-", "*"].contains(first),
+           contentStart.dropFirst().first == " " {
+            self.kind = .bullet
+            self.content = String(contentStart.dropFirst(2))
+            return
+        }
+
+        if let match = contentStart.range(of: #"^\d+\.\s"#, options: .regularExpression) {
+            let marker = String(contentStart[match])
+            let numberPart = marker.dropLast(2)
+            self.kind = .numbered(Int(numberPart) ?? 1)
+            self.content = String(contentStart[match.upperBound...])
+            return
+        }
+
+        return nil
+    }
+
+    var isEffectivelyEmpty: Bool {
+        content.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    var continuationPrefix: String {
+        String(repeating: " ", count: indentSpaces) + markerString(forIndentSpaces: indentSpaces)
+    }
+
+    func line(withIndentSpaces newIndentSpaces: Int) -> String {
+        String(repeating: " ", count: newIndentSpaces) + markerString(forIndentSpaces: newIndentSpaces) + content
+    }
+
+    private func markerString(forIndentSpaces indentSpaces: Int) -> String {
+        switch kind {
+        case .bullet:
+            return MarkdownListNormalizer.bullet(for: indentSpaces / MarkdownListNormalizer.indentWidth) + " "
+        case .numbered(let number):
+            return "\(number). "
         }
     }
 }
 
 private enum MarkdownStyler {
-    private enum ListMetrics {
-        static let indentStep: CGFloat = 24
-        static let markerGap: CGFloat = 10
-        static let topLevelMarkerWidth: CGFloat = 12
-        static let nestedMarkerWidth: CGFloat = 10
+    private static var bodyFont: NSFont {
+        NSFont.systemFont(ofSize: 14, weight: .regular)
+    }
+
+    private static var minimumBodyLineHeight: CGFloat {
+        bodyFont.ascender - bodyFont.descender + bodyFont.leading
     }
 
     static func makeAttributedString(text: String) -> NSAttributedString {
@@ -215,8 +537,8 @@ private enum MarkdownStyler {
         let attributed = NSMutableAttributedString(string: text)
 
         attributed.addAttributes([
-            .font: NSFont.systemFont(ofSize: 14, weight: .regular),
-            .foregroundColor: NSColor.labelColor
+            .font: bodyFont,
+            .foregroundColor: NSColor(Color.readingText)
         ], range: fullRange)
 
         let paragraphRanges = lineRanges(in: text)
@@ -254,7 +576,8 @@ private enum MarkdownStyler {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = 1
         paragraph.paragraphSpacing = 2
-        paragraph.firstLineHeadIndent = CGFloat(indentLevel) * ListMetrics.indentStep
+        paragraph.minimumLineHeight = minimumBodyLineHeight
+        paragraph.firstLineHeadIndent = CGFloat(indentLevel) * MarkdownListLayoutMetrics.indentStep
         paragraph.headIndent = paragraph.firstLineHeadIndent
 
         attributed.addAttribute(.paragraphStyle, value: paragraph, range: range)
@@ -263,7 +586,9 @@ private enum MarkdownStyler {
             attributed.addAttributes([
                 .font: NSFont.systemFont(ofSize: 18, weight: .bold)
             ], range: range)
-            hideMarkup(prefixLength: rawLine.prefix { $0 == " " }.count + 2, lineRange: range, in: attributed)
+            if let prefixRange = headingLayoutPrefixRange(in: rawLine, lineRange: range, markerCount: 1) {
+                collapse(range: prefixRange, in: attributed)
+            }
             return
         }
 
@@ -271,7 +596,9 @@ private enum MarkdownStyler {
             attributed.addAttributes([
                 .font: NSFont.systemFont(ofSize: 16, weight: .bold)
             ], range: range)
-            hideMarkup(prefixLength: rawLine.prefix { $0 == " " }.count + 3, lineRange: range, in: attributed)
+            if let prefixRange = headingLayoutPrefixRange(in: rawLine, lineRange: range, markerCount: 2) {
+                collapse(range: prefixRange, in: attributed)
+            }
             return
         }
 
@@ -279,32 +606,39 @@ private enum MarkdownStyler {
             attributed.addAttributes([
                 .font: NSFont.systemFont(ofSize: 14, weight: .semibold)
             ], range: range)
-            hideMarkup(prefixLength: rawLine.prefix { $0 == " " }.count + 4, lineRange: range, in: attributed)
+            if let prefixRange = headingLayoutPrefixRange(in: rawLine, lineRange: range, markerCount: 3) {
+                collapse(range: prefixRange, in: attributed)
+            }
             return
         }
 
-        if line.hasPrefix("- ") || line.hasPrefix("* ") {
-            let baseIndent = CGFloat(indentLevel) * ListMetrics.indentStep
-            let markerWidth = indentLevel == 0 ? ListMetrics.topLevelMarkerWidth : ListMetrics.nestedMarkerWidth
-            paragraph.firstLineHeadIndent = baseIndent + markerWidth + ListMetrics.markerGap
-            paragraph.headIndent = paragraph.firstLineHeadIndent
+        if let bulletLayoutPrefixRange = bulletLayoutPrefixRange(in: rawLine, lineRange: range) {
+            let baseIndent = CGFloat(indentLevel) * MarkdownListLayoutMetrics.indentStep
+            let textIndent = baseIndent
+                + MarkdownListLayoutMetrics.bulletMarkerWidth
+                + MarkdownListLayoutMetrics.markerGap
+            paragraph.firstLineHeadIndent = textIndent
+            paragraph.headIndent = textIndent
             attributed.addAttribute(.paragraphStyle, value: paragraph, range: range)
-            hideMarkup(prefixLength: rawLine.prefix { $0 == " " }.count + 2, lineRange: range, in: attributed)
+            attributed.addAttributes([
+                .font: NSFont.systemFont(ofSize: 0.1, weight: .regular),
+                .foregroundColor: NSColor.clear
+            ], range: bulletLayoutPrefixRange)
             return
         }
 
         if let numberedPrefix = line.range(of: #"^\d+\.\s"#, options: .regularExpression) {
             let prefixWidth = CGFloat(line.distance(from: numberedPrefix.lowerBound, to: numberedPrefix.upperBound)) * 7
-            let baseIndent = CGFloat(indentLevel) * ListMetrics.indentStep
-            paragraph.firstLineHeadIndent = baseIndent + prefixWidth + 8
-            paragraph.headIndent = baseIndent + prefixWidth + 8
+            let baseIndent = CGFloat(indentLevel) * MarkdownListLayoutMetrics.indentStep
+            paragraph.firstLineHeadIndent = baseIndent
+            paragraph.headIndent = baseIndent + max(MarkdownListLayoutMetrics.numberedMarkerBaseWidth, prefixWidth) + MarkdownListLayoutMetrics.markerGap
             attributed.addAttribute(.paragraphStyle, value: paragraph, range: range)
             return
         }
 
         if line.hasPrefix("> ") {
             attributed.addAttributes([
-                .foregroundColor: NSColor.secondaryLabelColor
+                .foregroundColor: NSColor(Color.readingText.opacity(0.68))
             ], range: range)
             hideMarkup(prefixLength: rawLine.prefix { $0 == " " }.count + 2, lineRange: range, in: attributed)
         }
@@ -343,11 +677,41 @@ private enum MarkdownStyler {
         hide(range: NSRange(location: lineRange.location, length: min(prefixLength, lineRange.length)), in: attributed)
     }
 
+    private static func bulletLayoutPrefixRange(in rawLine: String, lineRange: NSRange) -> NSRange? {
+        let indentSpaces = rawLine.prefix { $0 == " " }.count
+        let content = String(rawLine.dropFirst(indentSpaces))
+        guard let bullet = content.first,
+              MarkdownListNormalizer.isBullet(bullet),
+              content.dropFirst().first == " " else { return nil }
+        let prefixLength = min(indentSpaces + 2, lineRange.length)
+        guard prefixLength > 0 else { return nil }
+        return NSRange(location: lineRange.location, length: prefixLength)
+    }
+
+    private static func headingLayoutPrefixRange(
+        in rawLine: String,
+        lineRange: NSRange,
+        markerCount: Int
+    ) -> NSRange? {
+        let indentSpaces = rawLine.prefix { $0 == " " }.count
+        let prefixLength = min(indentSpaces + markerCount + 1, lineRange.length)
+        guard prefixLength > 0 else { return nil }
+        return NSRange(location: lineRange.location, length: prefixLength)
+    }
+
     private static func hide(range: NSRange, in attributed: NSMutableAttributedString) {
         guard range.location != NSNotFound, range.length > 0 else { return }
         attributed.addAttributes([
             .foregroundColor: NSColor.clear,
             .font: NSFont.systemFont(ofSize: 1)
+        ], range: range)
+    }
+
+    private static func collapse(range: NSRange, in attributed: NSMutableAttributedString) {
+        guard range.location != NSNotFound, range.length > 0 else { return }
+        attributed.addAttributes([
+            .foregroundColor: NSColor.clear,
+            .font: NSFont.systemFont(ofSize: 0.1)
         ], range: range)
     }
 }

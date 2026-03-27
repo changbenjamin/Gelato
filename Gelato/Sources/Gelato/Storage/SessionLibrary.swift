@@ -3,11 +3,7 @@ import Foundation
 /// Manages the catalog of all recorded sessions on disk.
 actor SessionLibrary {
     private let sessionsDirectory: URL
-    private let decoder: JSONDecoder = {
-        let d = JSONDecoder()
-        d.dateDecodingStrategy = .iso8601
-        return d
-    }()
+    private let decoder = SessionAudioTiming.makeJSONDecoder()
 
     init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -55,6 +51,7 @@ actor SessionLibrary {
             }
             return Utterance(text: record.text, speaker: record.speaker, timestamp: record.timestamp)
         }
+        .chronologicallySorted
     }
 
     /// Update the title for a session.
@@ -136,6 +133,12 @@ actor SessionLibrary {
             micURL: hasMic ? micURL : nil,
             systemURL: hasSystem ? systemURL : nil
         )
+    }
+
+    func audioTiming(for sessionID: String) -> SessionAudioTiming? {
+        let timingURL = sessionsDirectory.appendingPathComponent("\(sessionID).audio-timing.json")
+        guard let data = try? Data(contentsOf: timingURL) else { return nil }
+        return try? decoder.decode(SessionAudioTiming.self, from: data)
     }
 
     func combinedAudioOutputURL(for sessionID: String) -> URL {

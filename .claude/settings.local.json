@@ -5,7 +5,12 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebSearch",
       "WebFetch(domain:github.com)",
-      "Bash(git mv OpenGranola/Sources/OpenGranola/App/OpenGranolaApp.swift OpenGranola/Sources/OpenGranola/App/GelatoApp.swift)"
+      "Bash(git mv OpenGranola/Sources/OpenGranola/App/OpenGranolaApp.swift OpenGranola/Sources/OpenGranola/App/GelatoApp.swift)",
+      "Bash(xcodebuild -scheme Gelato -configuration Debug build)",
+      "Bash(find /Users/benjaminchang/code/Gelato -name *.xcodeproj -o -name *.xcworkspace -o -name Package.swift)",
+      "Bash(find /Users/benjaminchang/code/Gelato -maxdepth 3 -name *.xcodeproj -o -name *.xcworkspace -o -name Package.swift)",
+      "Bash(swift build:*)",
+      "Bash(xcodebuild -project Gelato/Gelato.xcodeproj -scheme Gelato -configuration Debug build)"
     ]
   }
 }

@@ -14,12 +14,12 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(transcriptionMode.rawValue, forKey: "transcriptionMode") }
     }
 
-    /// Stored as the AudioDeviceID integer. 0 means "use system default".
+    /// Stored as the AudioDeviceID integer. 0 means "automatic microphone selection".
     var inputDeviceID: AudioDeviceID {
         didSet { UserDefaults.standard.set(Int(inputDeviceID), forKey: "inputDeviceID") }
     }
 
-    /// When true, all app windows are invisible to screen sharing / recording.
+    /// When true, all app windows are hidden from screen sharing and screenshots.
     var hideFromScreenShare: Bool {
         didSet {
             UserDefaults.standard.set(hideFromScreenShare, forKey: "hideFromScreenShare")
@@ -27,24 +27,25 @@ final class AppSettings {
         }
     }
 
-    let elevenLabsAPIKey: String
     let openAIAPIKey: String
 
     init() {
         let defaults = UserDefaults.standard
         let env = EnvLoader.load()
         self.transcriptionLocale = defaults.string(forKey: "transcriptionLocale") ?? "en-US"
-        self.transcriptionMode = TranscriptionMode(
-            rawValue: defaults.string(forKey: "transcriptionMode") ?? ""
-        ) ?? .parakeet
+        let storedMode = defaults.string(forKey: "transcriptionMode") ?? ""
+        if storedMode == TranscriptionMode.legacyElevenLabsRawValue {
+            self.transcriptionMode = .openAIDiarize
+        } else {
+            self.transcriptionMode = TranscriptionMode(rawValue: storedMode) ?? .openAIDiarize
+        }
         self.inputDeviceID = AudioDeviceID(defaults.integer(forKey: "inputDeviceID"))
-        // Default to true (hidden) if key has never been set
+        // Default to false so screenshots work unless the user explicitly opts in.
         if defaults.object(forKey: "hideFromScreenShare") == nil {
-            self.hideFromScreenShare = true
+            self.hideFromScreenShare = false
         } else {
             self.hideFromScreenShare = defaults.bool(forKey: "hideFromScreenShare")
         }
-        self.elevenLabsAPIKey = env["ELEVENLABS_API_KEY"] ?? ""
         self.openAIAPIKey = env["OPENAI_API_KEY"] ?? ""
     }
 

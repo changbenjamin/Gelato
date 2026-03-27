@@ -6,7 +6,8 @@ struct LiveSessionView: View {
     let transcriptionEngine: TranscriptionEngine?
     @Bindable var settings: AppSettings
     @Binding var liveTitle: String
-    let audioLevel: Float
+    let micAudioLevel: Float
+    let systemAudioLevel: Float
     let sessionID: String?
     let library: SessionLibrary
     let onStop: () -> Void
@@ -18,7 +19,8 @@ struct LiveSessionView: View {
             // Title + live indicator header
             VStack(alignment: .leading, spacing: 6) {
                 TextField("Session title", text: $liveTitle)
-                    .font(.system(size: 22, weight: .bold))
+                    .font(.gelatoSerif(size: 28, weight: .semibold))
+                    .foregroundStyle(Color.warmTextPrimary)
                     .textFieldStyle(.plain)
 
                 HStack(spacing: 8) {
@@ -43,15 +45,15 @@ struct LiveSessionView: View {
                                 Text("Copy")
                                     .font(.system(size: 11))
                             }
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color.warmTextMuted)
                         }
                         .buttonStyle(.plain)
                     }
                 }
             }
             .padding(.horizontal, 24)
-            .padding(.top, 20)
-            .padding(.bottom, 12)
+            .padding(.top, 24)
+            .padding(.bottom, 14)
 
             // Tab picker
             HStack {
@@ -62,6 +64,7 @@ struct LiveSessionView: View {
             .padding(.bottom, 12)
 
             Divider()
+                .overlay(Color.warmBorder)
 
             // Content based on selected tab
             switch selectedTab {
@@ -91,22 +94,25 @@ struct LiveSessionView: View {
             }
 
             Divider()
+                .overlay(Color.warmBorder)
 
             // Control bar
             ControlBar(
                 isRunning: transcriptionEngine?.isRunning ?? false,
-                audioLevel: audioLevel,
+                micAudioLevel: micAudioLevel,
+                systemAudioLevel: systemAudioLevel,
                 statusMessage: transcriptionEngine?.assetStatus,
                 errorMessage: transcriptionEngine?.lastError,
                 onToggle: onStop
             )
         }
+        .background(Color.warmBackground)
     }
 
     private func copyTranscript() {
         let timeFmt = DateFormatter()
         timeFmt.dateFormat = "HH:mm:ss"
-        let lines = transcriptStore.utterances.map { u in
+        let lines = transcriptStore.utterances.chronologicallySorted.map { u in
             "[\(timeFmt.string(from: u.timestamp))] \(u.speaker == .you ? "You" : "Them"): \(u.text)"
         }
         NSPasteboard.general.clearContents()

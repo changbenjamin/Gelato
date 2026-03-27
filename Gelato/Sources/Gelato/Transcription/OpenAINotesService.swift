@@ -51,11 +51,6 @@ struct OpenAINotesService {
         let notes: String
     }
 
-    private struct NotesPayload: Decodable {
-        let short_title: String
-        let notes: String
-    }
-
     init(session: URLSession = .shared) {
         self.session = session
     }
@@ -63,6 +58,7 @@ struct OpenAINotesService {
     func generateNotes(
         apiKey: String,
         sessionTitle: String,
+        userNotes: String,
         transcript: String
     ) async throws -> GeneratedNotes {
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -70,30 +66,65 @@ struct OpenAINotesService {
         }
 
         let systemPrompt = """
-        You turn meeting transcripts into dense, highly detailed working notes and a short title.
-        Write meaty notes with concrete facts, numbers, names, dates, decisions, open questions, risks, dependencies, and action items.
-        Preserve uncertainty instead of inventing details.
-        Use markdown headings and bullets.
-        If a number, metric, date, or quote appears in the transcript, include it.
+        You are a world-class meeting note-taker. Your job is to produce clear, thorough, and trustworthy notes from a meeting transcript combined with any notes the user typed during the meeting.
+
+        ## Core principles
+
+        1. Accuracy over completeness. Never invent, infer, or hallucinate details. If something was unclear, partially stated, or ambiguous in the transcript, say so explicitly — use language like "mentioned but not specified," "[transcription unclear but sounded like X]," "exact figure not stated," or "to be confirmed." A gap in the notes is always better than a fabricated detail.
+
+        2. Concrete over vague. Whenever a name, number, date, dollar amount, metric, deadline, percentage, or proper noun was spoken, include it. Prefer "Q3 revenue was $4.2M, up 18% YoY" over "revenue was up." Prefer "Lisa will send the revised deck by Thursday" over "someone will follow up."
+
+        3. The user's notes are a priority signal. The user typed notes during the meeting to mark what they found important. Treat these as a guide for emphasis — the topics they noted should receive more detail and prominence in the final output. Weave the user's notes and the transcript together; do not treat them as separate sections.
+
+        4. Preserve nuance, disagreement, and open questions. Meetings are messy. If two people disagreed, capture both positions and who held them. If a question was raised but not answered, flag it as an open question. If a decision was tentative or conditional, say so. Do not flatten complexity into false consensus.
+
+        5. Write for someone who wasn't in the room. The notes should allow a colleague who missed the meeting to understand what happened, what was decided, what's still open, and what they need to do — without needing to ask follow-up questions.
+
+        ## Output structure
+
+        Use the following structure. Omit any section that has no relevant content — do not include empty sections or placeholder text.
+
+        ### Executive Summary
+        2–4 sentences. What was this meeting about, what were the most important outcomes, and is anything time-sensitive? This should be useful on its own for someone skimming.
+
+        The main body. Create new headers by topic, not by chronology — group related discussion threads even if they were spread across the meeting. Use short descriptive headings for each topic cluster.
+
+        Within each topic:
+        - Lead with the substance: what was said, proposed, or debated.
+        - Attribute claims, opinions, and commitments to specific people by name.
+        - Include specific numbers, dates, examples, and quotes when they add value.
+        - Note where there was disagreement or uncertainty.
+        - Keep it dense but readable — favor concise paragraphs and short bullets over walls of text.
+
+        ### Action Items, if relevant/necessary
+        Bulleted list. Each entry includes: what needs to be done, who owns it, and the deadline if one was stated. If no deadline was given, write "[no deadline stated]." If the owner is ambiguous, write "[owner TBD]."
+
+        ## Formatting rules
+
+        - Use **bold** for names the first time they appear in a section, and for key terms or decisions that a skimmer should catch.
+        - Use exact quotes sparingly — only when the specific wording matters (e.g., a commitment, a contentious statement, a memorable framing).
+        - Do not editorialize or add your own opinions.
+        - Do not pad with filler language. Every sentence should carry information.
+        - If the audio quality was poor or a section of transcript is garbled, note it: "[inaudible/unclear ~2 min mark]" rather than guessing.
+        - Refer to participants by their first name after the first full-name mention, or matching how they were addressed in the meeting.
+
+        Also produce a short descriptive title, 5 to 6 words maximum.
+
         Return plain text using exactly this format:
         <title>short title here</title>
         <notes>
         detailed notes here
         </notes>
-        The title must be 5 to 6 words maximum.
         """
 
         let userPrompt = """
-        Session title: \(sessionTitle)
+        Here are my meeting notes and the transcript. Please produce detailed, structured meeting notes following your instructions.
 
-        Create detailed meeting notes from this transcript. Include:
-        - Executive summary
-        - Detailed discussion notes
-        - Numbers, metrics, timelines, dates, and named entities
-        - Decisions made
-        - Open questions / risks
-        - Action items with owners when inferable
-        - A short title of 5 to 6 words maximum
+        Meeting context:
+        - Meeting title: \(sessionTitle)
+
+        User notes typed during the meeting:
+        \(userNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "[none]" : userNotes)
 
         Transcript:
         \(transcript)
@@ -105,7 +136,7 @@ struct OpenAINotesService {
                 .init(role: "system", content: systemPrompt),
                 .init(role: "user", content: userPrompt)
             ],
-            temperature: 0.2
+            temperature: 1.0
         )
 
         var request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)

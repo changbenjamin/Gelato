@@ -5,11 +5,15 @@ struct TranscriptView: View {
     let volatileYouText: String
     let volatileThemText: String
 
+    private var displayedUtterances: [Utterance] {
+        utterances.chronologicallySorted
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(utterances) { utterance in
+                    ForEach(displayedUtterances) { utterance in
                         UtteranceBubble(utterance: utterance)
                             .id(utterance.id)
                     }
@@ -25,11 +29,13 @@ struct TranscriptView: View {
                             .id("volatile-them")
                     }
                 }
-                .padding(16)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 18)
             }
+            .background(Color.warmCanvasBg)
             .onChange(of: utterances.count) {
                 withAnimation(.easeOut(duration: 0.2)) {
-                    if let last = utterances.last {
+                    if let last = displayedUtterances.last {
                         proxy.scrollTo(last.id, anchor: .bottom)
                     }
                 }
@@ -48,16 +54,18 @@ private struct UtteranceBubble: View {
     let utterance: Utterance
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(alignment: .top, spacing: 10) {
             Text(utterance.speaker == .you ? "You" : "Them")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(utterance.speaker == .you ? Color.youColor : Color.themColor)
-                .frame(width: 36, alignment: .trailing)
+                .frame(width: 42, alignment: .trailing)
+                .padding(.top, 3)
 
             Text(utterance.text)
                 .font(.system(size: 13))
-                .foregroundStyle(.primary)
+                .foregroundStyle(Color.readingText)
                 .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
@@ -67,30 +75,24 @@ private struct VolatileIndicator: View {
     let speaker: Speaker
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(alignment: .top, spacing: 10) {
             Text(speaker == .you ? "You" : "Them")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(speaker == .you ? Color.youColor : Color.themColor)
-                .frame(width: 36, alignment: .trailing)
+                .frame(width: 42, alignment: .trailing)
+                .padding(.top, 3)
 
             HStack(spacing: 4) {
                 Text(text)
                     .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.readingText.opacity(0.7))
                 Circle()
                     .fill(speaker == .you ? Color.youColor : Color.themColor)
                     .frame(width: 4, height: 4)
                     .opacity(0.6)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .opacity(0.6)
     }
-}
-
-// MARK: - Colors
-
-extension Color {
-    static let youColor = Color(red: 0.35, green: 0.55, blue: 0.75)    // muted blue
-    static let themColor = Color(red: 0.82, green: 0.6, blue: 0.3)     // warm amber
-    static let accentTeal = Color(red: 0.15, green: 0.55, blue: 0.55)  // deep teal
 }

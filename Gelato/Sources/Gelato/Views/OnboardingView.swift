@@ -32,7 +32,8 @@ struct OnboardingView: View {
 
             // Title
             Text(steps[currentStep].title)
-                .font(.system(size: 16, weight: .semibold))
+                .font(.gelatoSerif(size: 26, weight: .semibold))
+                .foregroundStyle(Color.warmTextPrimary)
                 .multilineTextAlignment(.center)
 
             Spacer().frame(height: 10)
@@ -40,7 +41,7 @@ struct OnboardingView: View {
             // Body
             Text(steps[currentStep].body)
                 .font(.system(size: 13))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.warmTextSecondary)
                 .multilineTextAlignment(.center)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -51,7 +52,7 @@ struct OnboardingView: View {
             HStack(spacing: 8) {
                 ForEach(0..<steps.count, id: \.self) { i in
                     Circle()
-                        .fill(i == currentStep ? Color.accentTeal : Color.secondary.opacity(0.3))
+                        .fill(i == currentStep ? Color.accentTeal : Color.warmTextMuted.opacity(0.3))
                         .frame(width: 6, height: 6)
                 }
             }
@@ -64,7 +65,7 @@ struct OnboardingView: View {
                 }
                 .buttonStyle(.plain)
                 .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.warmTextMuted)
 
                 Spacer()
 
@@ -89,6 +90,7 @@ struct OnboardingView: View {
         }
         .padding(28)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.warmBackground.opacity(0.97))
         .background(.ultraThinMaterial)
     }
 

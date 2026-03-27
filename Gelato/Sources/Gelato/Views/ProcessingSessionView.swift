@@ -10,15 +10,17 @@ struct ProcessingSessionView: View {
             ProgressView()
                 .controlSize(.large)
             Text(title)
-                .font(.system(size: 22, weight: .bold))
+                .font(.gelatoSerif(size: 28, weight: .semibold))
+                .foregroundStyle(Color.warmTextPrimary)
             Text(status)
                 .font(.system(size: 13))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.warmTextSecondary)
             Text("You can edit the session once processing finishes.")
                 .font(.system(size: 12))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Color.warmTextMuted)
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.warmBackground)
     }
 }

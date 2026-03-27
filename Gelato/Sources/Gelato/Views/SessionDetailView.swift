@@ -21,15 +21,15 @@ struct DetailTabPicker: View {
                 } label: {
                     Text(tab.rawValue)
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(selection == tab ? .primary : .secondary)
+                        .foregroundStyle(selection == tab ? Color.warmTextPrimary : Color.warmTextMuted)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 6)
                         .background(
                             Group {
                                 if selection == tab {
                                     Capsule()
-                                        .fill(.background)
-                                        .shadow(color: .black.opacity(0.06), radius: 1, y: 1)
+                                        .fill(Color.warmCardBg)
+                                        .shadow(color: .black.opacity(0.05), radius: 8, y: 2)
                                 }
                             }
                         )
@@ -38,7 +38,7 @@ struct DetailTabPicker: View {
             }
         }
         .padding(3)
-        .background(Capsule().fill(.quaternary.opacity(0.5)))
+        .background(Capsule().fill(Color.warmHover))
     }
 }
 
@@ -60,7 +60,8 @@ struct SessionDetailView: View {
             // Title + metadata header
             VStack(alignment: .leading, spacing: 6) {
                 TextField("Session title", text: $editableTitle)
-                    .font(.system(size: 22, weight: .bold))
+                    .font(.gelatoSerif(size: 28, weight: .semibold))
+                    .foregroundStyle(Color.warmTextPrimary)
                     .textFieldStyle(.plain)
                     .focused($isTitleFocused)
                     .onSubmit {
@@ -76,27 +77,22 @@ struct SessionDetailView: View {
                 HStack(spacing: 8) {
                     Text(formattedDate)
                         .font(.system(size: 12))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(Color.warmTextMuted)
+
+                    Text("·")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.warmTextMuted.opacity(0.5))
+                    Text(formatTime(session.metadata.createdAt))
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.warmTextMuted)
 
                     if let duration = session.metadata.durationSeconds, duration > 0 {
                         Text("·")
                             .font(.system(size: 12))
-                            .foregroundStyle(.quaternary)
+                            .foregroundStyle(Color.warmTextMuted.opacity(0.5))
                         Text(formattedDuration(duration))
                             .font(.system(size: 12))
-                            .foregroundStyle(.tertiary)
-                    }
-
-                    if !isLoading {
-                        let wc = utterances.reduce(0) { $0 + $1.text.split(separator: " ").count }
-                        if wc > 0 {
-                            Text("·")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.quaternary)
-                            Text(formatWordCount(wc))
-                                .font(.system(size: 12))
-                                .foregroundStyle(.tertiary)
-                        }
+                            .foregroundStyle(Color.warmTextMuted)
                     }
 
                     Spacer()
@@ -111,15 +107,15 @@ struct SessionDetailView: View {
                                 Text("Copy")
                                     .font(.system(size: 11))
                             }
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color.warmTextMuted)
                         }
                         .buttonStyle(.plain)
                     }
                 }
             }
             .padding(.horizontal, 24)
-            .padding(.top, 20)
-            .padding(.bottom, 12)
+            .padding(.top, 24)
+            .padding(.bottom, 14)
 
             // Tab picker
             HStack {
@@ -130,6 +126,7 @@ struct SessionDetailView: View {
             .padding(.bottom, 12)
 
             Divider()
+                .overlay(Color.warmBorder)
 
             // Content based on selected tab
             switch selectedTab {
@@ -146,12 +143,13 @@ struct SessionDetailView: View {
                     Spacer()
                     Text("No transcript data")
                         .font(.system(size: 13))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(Color.warmTextMuted)
                     Spacer()
                 } else {
                     VStack(spacing: 0) {
                         AudioSessionCard(sessionID: session.id, library: library)
                         Divider()
+                            .overlay(Color.warmBorder)
                         TranscriptView(
                             utterances: utterances,
                             volatileYouText: "",
@@ -161,6 +159,7 @@ struct SessionDetailView: View {
                 }
             }
         }
+        .background(Color.warmBackground)
         .task {
             editableTitle = session.metadata.title
             let loaded = await library.loadTranscript(for: session.id)
@@ -184,8 +183,7 @@ struct SessionDetailView: View {
 
     private var formattedDate: String {
         let fmt = DateFormatter()
-        fmt.dateStyle = .medium
-        fmt.timeStyle = .short
+        fmt.dateFormat = "MMM d, yyyy"
         return fmt.string(from: session.metadata.createdAt)
     }
 
@@ -202,7 +200,7 @@ struct SessionDetailView: View {
     private func copyTranscript() {
         let timeFmt = DateFormatter()
         timeFmt.dateFormat = "HH:mm:ss"
-        let lines = utterances.map { u in
+        let lines = utterances.chronologicallySorted.map { u in
             "[\(timeFmt.string(from: u.timestamp))] \(u.speaker == .you ? "You" : "Them"): \(u.text)"
         }
         NSPasteboard.general.clearContents()
