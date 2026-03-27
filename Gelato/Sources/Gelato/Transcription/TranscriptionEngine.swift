@@ -55,6 +55,10 @@ final class TranscriptionEngine {
     private var defaultDeviceListenerBlock: AudioObjectPropertyListenerBlock?
     /// Listens for default output device changes so the system-audio tap follows speaker swaps.
     private var defaultOutputDeviceListenerBlock: AudioObjectPropertyListenerBlock?
+    /// Debounced mic restart task — cancelled and recreated on each device change notification
+    /// so that rapid-fire events (e.g. AirPods disconnect triggers both input + output changes)
+    /// collapse into a single restart.
+    private var micRestartTask: Task<Void, Never>?
 
     init(transcriptStore: TranscriptStore) {
         self.transcriptStore = transcriptStore
@@ -192,17 +196,29 @@ final class TranscriptionEngine {
         installDefaultOutputDeviceListener()
     }
 
+    /// Schedule a debounced mic restart. Multiple calls within 300ms collapse into one,
+    /// coalescing the input + output device change notifications that fire simultaneously
+    /// when AirPods connect/disconnect.
+    private func scheduleMicRestart() {
+        micRestartTask?.cancel()
+        micRestartTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard let self, !Task.isCancelled, self.isRunning else { return }
+            let requestedMicID = self.userSelectedDeviceID
+            self.restartMic(inputDeviceID: requestedMicID, force: true)
+        }
+    }
+
     /// Restart only the mic capture with a new device, keeping system audio and models intact.
-    /// Pass the raw setting value (0 = system default, or a specific AudioDeviceID).
-    func restartMic(inputDeviceID: AudioDeviceID) {
+    /// Pass the raw setting value (0 = automatic selection, or a specific AudioDeviceID).
+    func restartMic(inputDeviceID: AudioDeviceID, force: Bool = false) {
         guard isRunning, let asrManager, let vadManager else { return }
 
-        // Only update user selection when explicitly changed (not from OS listener)
         if inputDeviceID != 0 || userSelectedDeviceID != 0 {
             userSelectedDeviceID = inputDeviceID
         }
         let targetMicID = inputDeviceID > 0 ? inputDeviceID : MicCapture.automaticInputDeviceID() ?? 0
-        guard targetMicID != currentMicDeviceID else {
+        guard force || targetMicID != currentMicDeviceID else {
             diagLog("[ENGINE-MIC-SWAP] same device \(targetMicID), skipping")
             return
         }
@@ -216,7 +232,8 @@ final class TranscriptionEngine {
 
         currentMicDeviceID = targetMicID
 
-        // Start new mic stream
+        // Start new mic stream — makeFreshEngine() inside bufferStream handles
+        // format negotiation automatically, no stabilization delay needed.
         let audioRecorder = self.audioRecorder
         let micStream = micCapture.bufferStream(
             deviceID: targetMicID,
@@ -262,8 +279,8 @@ final class TranscriptionEngine {
             guard let self else { return }
             Task { @MainActor in
                 guard self.isRunning, self.userSelectedDeviceID == 0 else { return }
-                // User has automatic mic selection enabled, so re-resolve the best input device.
-                self.restartMic(inputDeviceID: 0)
+                diagLog("[ENGINE-DEVICE-CHANGE] default input device changed, scheduling mic restart")
+                self.scheduleMicRestart()
             }
         }
         defaultDeviceListenerBlock = block
@@ -289,7 +306,9 @@ final class TranscriptionEngine {
             guard let self else { return }
             Task { @MainActor in
                 guard self.isRunning else { return }
+                diagLog("[ENGINE-DEVICE-CHANGE] default output device changed, restarting system + scheduling mic restart")
                 await self.restartSystemCapture()
+                self.scheduleMicRestart()
             }
         }
         defaultOutputDeviceListenerBlock = block
@@ -407,6 +426,8 @@ final class TranscriptionEngine {
         diagLog("[ENGINE-STOP] begin")
         removeDefaultDeviceListener()
         removeDefaultOutputDeviceListener()
+        micRestartTask?.cancel()
+        micRestartTask = nil
         let micTask = self.micTask
         let sysTask = self.sysTask
         self.micKeepAliveTask?.cancel()

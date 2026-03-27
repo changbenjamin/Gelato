@@ -5,10 +5,10 @@ enum OpenAIDiarizationInputBuilder {
     private static let targetSampleRate: Double = 16_000
     private static let inputFrameCapacity: AVAudioFrameCount = 8_192
     private static let targetPeak: Float = 0.85
-    private static let minimumSystemGain: Float = 1.0
-    private static let maximumSystemGain: Float = 8.0
-    private static let desiredSystemToMicRMSRatio: Float = 1.1
-    private static let maximumMicDuckAmount: Float = 0.6
+    private static let minimumMicGain: Float = 3.0
+    private static let maximumMicGain: Float = 20.0
+    private static let desiredMicToSystemRMSRatio: Float = 1.1
+    private static let maximumMicDuckAmount: Float = 0.0
     private static let duckAttack: Float = 0.35
     private static let duckRelease: Float = 0.015
 
@@ -147,18 +147,29 @@ enum OpenAIDiarizationInputBuilder {
 
         let inputFile = try AVAudioFile(forReading: url)
         let sourceFormat = inputFile.processingFormat
-        let floatFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
+        guard let floatFormat = makeFloatFormat(
             sampleRate: sourceFormat.sampleRate,
-            channels: sourceFormat.channelCount,
-            interleaved: false
-        )!
+            channels: sourceFormat.channelCount
+        ) else {
+            diagLog(
+                "[OPENAI-UPLOAD] unable to create float format for \(url.lastPathComponent) " +
+                "sr=\(sourceFormat.sampleRate) ch=\(sourceFormat.channelCount)"
+            )
+            return nil
+        }
 
         let needsFloatConversion =
             sourceFormat.commonFormat != .pcmFormatFloat32 || sourceFormat.isInterleaved
         let floatConverter = needsFloatConversion
             ? AVAudioConverter(from: sourceFormat, to: floatFormat)
             : nil
+        if needsFloatConversion, floatConverter == nil {
+            diagLog(
+                "[OPENAI-UPLOAD] unable to convert \(url.lastPathComponent) " +
+                "from \(sourceFormat) to \(floatFormat)"
+            )
+            return nil
+        }
 
         var samples: [Float] = []
 
@@ -211,6 +222,35 @@ enum OpenAIDiarizationInputBuilder {
         return LoadedSource(samples: samples, sampleRate: sourceFormat.sampleRate)
     }
 
+    private static func makeFloatFormat(
+        sampleRate: Double,
+        channels: AVAudioChannelCount
+    ) -> AVAudioFormat? {
+        guard sampleRate > 0, channels > 0 else { return nil }
+
+        if channels > 2,
+           let channelLayout = discreteChannelLayout(channels: channels) {
+            return AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: sampleRate,
+                interleaved: false,
+                channelLayout: channelLayout
+            )
+        }
+
+        return AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sampleRate,
+            channels: channels,
+            interleaved: false
+        )
+    }
+
+    private static func discreteChannelLayout(channels: AVAudioChannelCount) -> AVAudioChannelLayout? {
+        let layoutTag = AudioChannelLayoutTag(kAudioChannelLayoutTag_DiscreteInOrder | UInt32(channels))
+        return AVAudioChannelLayout(layoutTag: layoutTag)
+    }
+
     private static func mixingGains(
         micSource: LoadedSource?,
         systemSource: LoadedSource?
@@ -225,15 +265,15 @@ enum OpenAIDiarizationInputBuilder {
             return (mic: 1.0, system: 1.0)
         }
 
-        let desiredSystemGain = (micRMS * desiredSystemToMicRMSRatio) / systemRMS
-        let systemGain = min(max(desiredSystemGain, minimumSystemGain), maximumSystemGain)
+        let desiredMicGain = (systemRMS * desiredMicToSystemRMSRatio) / micRMS
+        let micGain = min(max(desiredMicGain, minimumMicGain), maximumMicGain)
 
         diagLog(
             "[OPENAI-UPLOAD] balancing stems micRMS=\(micRMS) systemRMS=\(systemRMS) " +
-            "systemGain=\(systemGain)"
+            "micGain=\(micGain)"
         )
 
-        return (mic: 1.0, system: systemGain)
+        return (mic: micGain, system: 1.0)
     }
 
     private static func mergeForDiarization(

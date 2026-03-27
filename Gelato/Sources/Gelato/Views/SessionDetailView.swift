@@ -63,6 +63,7 @@ struct SessionDetailView: View {
     @State private var notesMarkdown = ""
     @State private var isLoading = true
     @State private var isRegenerating = false
+    @State private var regeneratingStatus = "Processing session..."
     @State private var hasSessionAudio = false
     @State private var regenerationErrorMessage: String?
     @State private var selectedTab: DetailTab = .notes
@@ -70,6 +71,52 @@ struct SessionDetailView: View {
     @FocusState private var isTitleFocused: Bool
 
     var body: some View {
+        Group {
+            if isRegenerating {
+                ProcessingSessionView(
+                    title: "Regenerating...",
+                    status: regeneratingStatus
+                )
+            } else {
+                normalDetailView
+            }
+        }
+        .background(Color.warmBackground)
+        .task(id: session.id) {
+            editableTitle = session.metadata.title
+            await reloadSessionContent()
+        }
+        .onChange(of: editableTitle) {
+            // Auto-save title on every change (debounced)
+            titleSaveTask?.cancel()
+            titleSaveTask = Task {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard !Task.isCancelled else { return }
+                let trimmed = editableTitle.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty else { return }
+                await listModel.updateTitle(sessionID: session.id, newTitle: trimmed)
+            }
+            meetingQAStore.updateContext(
+                sessionTitle: editableTitle,
+                utterances: utterances,
+                library: library,
+                apiKey: openAIAPIKey
+            )
+        }
+        .alert(
+            "Couldn't Regenerate",
+            isPresented: Binding(
+                get: { regenerationErrorMessage != nil },
+                set: { if !$0 { regenerationErrorMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(regenerationErrorMessage ?? "")
+        }
+    }
+
+    private var normalDetailView: some View {
         VStack(spacing: 0) {
             // Title + metadata header
             VStack(alignment: .leading, spacing: 6) {
@@ -125,10 +172,6 @@ struct SessionDetailView: View {
                     regenerateTranscriptAndNotes()
                 } label: {
                     HStack(spacing: 6) {
-                        if isRegenerating {
-                            ProgressView()
-                                .controlSize(.small)
-                        }
                         Text("Regenerate")
                             .font(.system(size: 11))
                     }
@@ -189,39 +232,6 @@ struct SessionDetailView: View {
                 }
             }
         }
-        .background(Color.warmBackground)
-        .task(id: session.id) {
-            editableTitle = session.metadata.title
-            await reloadSessionContent()
-        }
-        .onChange(of: editableTitle) {
-            // Auto-save title on every change (debounced)
-            titleSaveTask?.cancel()
-            titleSaveTask = Task {
-                try? await Task.sleep(for: .milliseconds(500))
-                guard !Task.isCancelled else { return }
-                let trimmed = editableTitle.trimmingCharacters(in: .whitespaces)
-                guard !trimmed.isEmpty else { return }
-                await listModel.updateTitle(sessionID: session.id, newTitle: trimmed)
-            }
-            meetingQAStore.updateContext(
-                sessionTitle: editableTitle,
-                utterances: utterances,
-                library: library,
-                apiKey: openAIAPIKey
-            )
-        }
-        .alert(
-            "Couldn't Regenerate",
-            isPresented: Binding(
-                get: { regenerationErrorMessage != nil },
-                set: { if !$0 { regenerationErrorMessage = nil } }
-            )
-        ) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(regenerationErrorMessage ?? "")
-        }
     }
 
     // MARK: - Helpers
@@ -250,16 +260,22 @@ struct SessionDetailView: View {
 
         case .transcript:
             if isLoading {
-                Spacer()
-                ProgressView("Loading transcript...")
-                    .font(.system(size: 12))
-                Spacer()
+                VStack {
+                    Spacer()
+                    ProgressView("Loading transcript...")
+                        .font(.system(size: 12))
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if utterances.isEmpty {
-                Spacer()
-                Text("No transcript data")
-                    .font(.system(size: 13))
-                    .foregroundStyle(Color.warmTextMuted)
-                Spacer()
+                VStack {
+                    Spacer()
+                    Text("No transcript yet")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.warmTextMuted)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 VStack(spacing: 0) {
                     AudioSessionCard(sessionID: session.id, library: library)
@@ -277,16 +293,22 @@ struct SessionDetailView: View {
 
         case .chat:
             if isLoading {
-                Spacer()
-                ProgressView("Loading transcript...")
-                    .font(.system(size: 12))
-                Spacer()
+                VStack {
+                    Spacer()
+                    ProgressView("Loading transcript...")
+                        .font(.system(size: 12))
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if utterances.isEmpty {
-                Spacer()
-                Text("No transcript data")
-                    .font(.system(size: 13))
-                    .foregroundStyle(Color.warmTextMuted)
-                Spacer()
+                VStack {
+                    Spacer()
+                    Text("No chat yet")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.warmTextMuted)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 MeetingQAContainerView(
                     presentation: .fullPage,
@@ -378,6 +400,7 @@ struct SessionDetailView: View {
         let currentTitle = editableTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         let sessionTitle = currentTitle.isEmpty ? session.metadata.title : currentTitle
         regenerationErrorMessage = nil
+        regeneratingStatus = "Creating combined audio..."
         isRegenerating = true
 
         Task {
@@ -385,6 +408,8 @@ struct SessionDetailView: View {
                 sessionID: session.id,
                 library: library
             )
+
+            regeneratingStatus = "Processing audio with OpenAI gpt-4o-transcribe-diarize..."
 
             let transcriptResult = await SessionFinalizer.finalizeDiarizedTranscript(
                 sessionID: session.id,
@@ -401,6 +426,8 @@ struct SessionDetailView: View {
                 isRegenerating = false
                 return
             }
+
+            regeneratingStatus = "Generating title and detailed notes..."
 
             let notesResult = await SessionFinalizer.generateNotesIfPossible(
                 sessionID: session.id,

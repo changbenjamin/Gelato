@@ -10,7 +10,13 @@
       "Bash(find /Users/benjaminchang/code/Gelato -name *.xcodeproj -o -name *.xcworkspace -o -name Package.swift)",
       "Bash(find /Users/benjaminchang/code/Gelato -maxdepth 3 -name *.xcodeproj -o -name *.xcworkspace -o -name Package.swift)",
       "Bash(swift build:*)",
-      "Bash(xcodebuild -project Gelato/Gelato.xcodeproj -scheme Gelato -configuration Debug build)"
+      "Bash(xcodebuild -project Gelato/Gelato.xcodeproj -scheme Gelato -configuration Debug build)",
+      "Bash(pkill -x Gelato)",
+      "Bash(open /Users/benjaminchang/code/Gelato/Gelato/.build/release/Gelato)",
+      "Bash(ls /Users/benjaminchang/code/Gelato/*.xcodeproj)",
+      "Bash(ls /Users/benjaminchang/code/Gelato/*.xcworkspace)",
+      "Bash(open /Users/benjaminchang/code/Gelato/dist/Gelato.app)",
+      "Bash(./scripts/build_swift_app.sh)"
     ]
   }
 }

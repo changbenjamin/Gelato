@@ -2,26 +2,20 @@
 import CoreAudio
 import Foundation
 
-/// Captures microphone audio directly from a Core Audio input device.
+/// Captures microphone audio via AVAudioEngine and streams PCM buffers.
 ///
-/// Using AVAudioEngine here caused headset-connected setups to hang or ignore
-/// the requested input device, especially with Bluetooth outputs. A direct HAL
-/// capture path keeps mic selection independent from the active speaker route.
+/// Creates a fresh AVAudioEngine for each `bufferStream()` call, which avoids
+/// stale format state during device switches (e.g. AirPods connect/disconnect).
+/// Device selection is set via AudioUnit property before the engine starts.
 final class MicCapture: @unchecked Sendable {
-    private let stateLock = NSLock()
-    private let continuationLock = NSLock()
-    private let callbackLock = NSLock()
-    private let ioQueue = DispatchQueue(label: "com.gelato.mic.capture")
-    private let deliveryQueue = DispatchQueue(label: "com.gelato.mic.delivery")
+    private var engine = AVAudioEngine()
+    private var hasTapInstalled = false
     private let _audioLevel = AudioLevel()
     private let _error = SyncString()
-
+    private let continuationLock = NSLock()
+    private let callbackLock = NSLock()
     private var continuation: AsyncStream<CapturedAudioBuffer>.Continuation?
     private var onBuffer: (@Sendable (CapturedAudioBuffer) -> Void)?
-    private var captureDeviceID: AudioDeviceID?
-    private var ioProcID: AudioDeviceIOProcID?
-    private var inputFormat: AVAudioFormat?
-    private var accumulator: PCMChunkAccumulator?
     private var deliveredChunkCount = 0
 
     var audioLevel: Float { _audioLevel.value }
@@ -31,38 +25,129 @@ final class MicCapture: @unchecked Sendable {
         deviceID: AudioDeviceID? = nil,
         onBuffer: (@Sendable (CapturedAudioBuffer) -> Void)? = nil
     ) -> AsyncStream<CapturedAudioBuffer> {
-        callbackLock.withLock {
-            self.onBuffer = onBuffer
-        }
+        // Defensive cleanup of any prior state
+        continuationLock.withLock { continuation?.finish(); continuation = nil }
+        callbackLock.withLock { self.onBuffer = onBuffer }
 
         let stream = AsyncStream<CapturedAudioBuffer>(bufferingPolicy: .bufferingNewest(32)) { continuation in
             self._error.value = nil
             self.continuationLock.withLock {
                 self.continuation = continuation
             }
-            continuation.onTermination = { [weak self] _ in
-                diagLog("[MIC-TERM] stream terminated, stopping capture")
-                self?.stopCapture(finishStream: false)
+            continuation.onTermination = { _ in
+                diagLog("[MIC-TERM] stream terminated")
             }
         }
 
         diagLog("[MIC-1] bufferStream called, deviceID=\(String(describing: deviceID))")
 
+        let freshEngine = makeFreshEngine()
+        let inputNode = freshEngine.inputNode
+
+        // Set input device before accessing inputNode format
+        var resolvedDeviceID: AudioDeviceID?
+        if let id = deviceID {
+            guard let inAU = inputNode.audioUnit else {
+                let msg = "inputNode has no audio unit"
+                diagLog("[MIC-FAIL] \(msg)")
+                _error.value = msg
+                continuationLock.withLock { continuation?.finish(); continuation = nil }
+                return stream
+            }
+            var devID = id
+            let status = AudioUnitSetProperty(
+                inAU,
+                kAudioOutputUnitProperty_CurrentDevice,
+                kAudioUnitScope_Global,
+                0,
+                &devID,
+                UInt32(MemoryLayout<AudioDeviceID>.size)
+            )
+            diagLog("[MIC-2] setInputDevice status=\(status) (0=ok)")
+            resolvedDeviceID = id
+        } else {
+            resolvedDeviceID = Self.defaultInputDeviceID()
+        }
+
+        let format = inputNode.outputFormat(forBus: 0)
+
+        // Query the hardware sample rate directly — the inputNode format can lag
+        // behind a device switch (e.g. USB mic at 48kHz while engine reports 44.1kHz).
+        var sampleRate = format.sampleRate
+        if let devID = resolvedDeviceID,
+           let hwRate = Self.deviceNominalSampleRate(for: devID),
+           hwRate > 0, hwRate != sampleRate {
+            diagLog("[MIC-3] hardware sr=\(hwRate) differs from inputNode sr=\(sampleRate), using hardware rate")
+            sampleRate = hwRate
+        }
+
+        diagLog("[MIC-3] inputNode format: sr=\(format.sampleRate) ch=\(format.channelCount) interleaved=\(format.isInterleaved), effective sr=\(sampleRate)")
+
+        guard sampleRate > 0 && format.channelCount > 0 else {
+            let msg = "Invalid audio format: sr=\(sampleRate) ch=\(format.channelCount)"
+            diagLog("[MIC-FAIL] \(msg)")
+            _error.value = msg
+            continuationLock.withLock { continuation?.finish(); continuation = nil }
+            return stream
+        }
+
+        // Try multiple tap formats. Prefer mono — it's what the transcriber
+        // needs, and multi-channel formats (e.g. MacBook Air's 3-element mic
+        // array) can cause issues downstream. Fall back through progressively
+        // wider options until one works.
+        let tapFormat: AVAudioFormat
+        if let f = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1) {
+            tapFormat = f
+        } else if format.channelCount > 1,
+                  let f = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: format.channelCount) {
+            diagLog("[MIC-4] mono format failed, using \(format.channelCount) channels")
+            tapFormat = f
+        } else if sampleRate != format.sampleRate,
+                  let f = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: 1) {
+            diagLog("[MIC-4] hardware-rate mono failed, using node rate \(format.sampleRate)")
+            tapFormat = f
+        } else {
+            diagLog("[MIC-4] standard formats failed, using native input format")
+            tapFormat = format
+        }
+
+        diagLog("[MIC-4] tapFormat: sr=\(tapFormat.sampleRate) ch=\(tapFormat.channelCount)")
+
+        let level = _audioLevel
+        deliveredChunkCount = 0
+
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) { [weak self] buffer, _ in
+            guard let self, buffer.frameLength > 0 else { return }
+
+            self.deliveredChunkCount += 1
+            let count = self.deliveredChunkCount
+            let rms = Self.normalizedRMS(from: buffer)
+            level.value = min(rms * 25, 1.0)
+
+            if count <= 5 || count % 100 == 0 {
+                diagLog("[MIC-6] tap #\(count): frames=\(buffer.frameLength) rms=\(rms) level=\(level.value)")
+            }
+
+            let capturedBuffer = CapturedAudioBuffer(buffer: buffer, capturedAt: Date())
+
+            let callback = self.callbackLock.withLock { self.onBuffer }
+            callback?(capturedBuffer)
+
+            let cont = self.continuationLock.withLock { self.continuation }
+            _ = cont?.yield(capturedBuffer)
+        }
+        hasTapInstalled = true
+
         do {
-            try startCapture(deviceID: deviceID ?? Self.defaultInputDeviceID())
+            try freshEngine.start()
+            diagLog("[MIC-5] engine started, isRunning=\(freshEngine.isRunning)")
         } catch {
-            let message = "Mic failed: \(error.localizedDescription)"
-            diagLog("[MIC-FAIL] \(message)")
-            _error.value = message
-            callbackLock.withLock {
-                self.onBuffer = nil
-            }
-            let currentContinuation = continuationLock.withLock { () -> AsyncStream<CapturedAudioBuffer>.Continuation? in
-                let current = continuation
-                continuation = nil
-                return current
-            }
-            currentContinuation?.finish()
+            let msg = "Mic failed: \(error.localizedDescription)"
+            diagLog("[MIC-FAIL] \(msg)")
+            _error.value = msg
+            hasTapInstalled = false
+            callbackLock.withLock { self.onBuffer = nil }
+            continuationLock.withLock { continuation?.finish(); continuation = nil }
         }
 
         return stream
@@ -70,206 +155,28 @@ final class MicCapture: @unchecked Sendable {
 
     func stop() {
         diagLog("[MIC-STOP] begin")
-        stopCapture(finishStream: true)
+        continuationLock.withLock { continuation?.finish(); continuation = nil }
+        callbackLock.withLock { onBuffer = nil }
+        if hasTapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            hasTapInstalled = false
+        }
+        engine.stop()
+        engine.reset()
+        _audioLevel.value = 0
+        deliveredChunkCount = 0
         diagLog("[MIC-STOP] end")
     }
 
-    private func startCapture(deviceID: AudioDeviceID?) throws {
-        guard let deviceID else {
-            throw CaptureError.noInputDevice
+    private func makeFreshEngine() -> AVAudioEngine {
+        if hasTapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            hasTapInstalled = false
         }
-
-        let deviceName = Self.deviceName(for: deviceID) ?? "Unknown input device"
-        let format = try Self.inputFormat(for: deviceID)
-        let accumulator = try PCMChunkAccumulator(format: format, targetFrameCount: 4096)
-
-        diagLog("[MIC-2] selected device id=\(deviceID) name=\(deviceName)")
-        diagLog(
-            "[MIC-3] input format: sr=\(format.sampleRate) ch=\(format.channelCount) " +
-            "interleaved=\(format.isInterleaved) commonFormat=\(format.commonFormat.rawValue)"
-        )
-
-        var createdIOProcID: AudioDeviceIOProcID?
-        let createStatus = AudioDeviceCreateIOProcIDWithBlock(
-            &createdIOProcID,
-            deviceID,
-            ioQueue
-        ) { [weak self] inNow, inputData, inputTime, _, _ in
-            self?.handleInputData(
-                inputData,
-                inputTime: inputTime,
-                fallbackTime: inNow
-            )
-        }
-
-        guard createStatus == noErr, let createdIOProcID else {
-            throw CaptureError.ioProcCreationFailed(status: createStatus)
-        }
-
-        let startStatus = AudioDeviceStart(deviceID, createdIOProcID)
-        guard startStatus == noErr else {
-            _ = AudioDeviceDestroyIOProcID(deviceID, createdIOProcID)
-            throw CaptureError.startFailed(status: startStatus)
-        }
-
-        stateLock.withLock {
-            self.captureDeviceID = deviceID
-            self.ioProcID = createdIOProcID
-            self.inputFormat = format
-            self.accumulator = accumulator
-            self.deliveredChunkCount = 0
-        }
-
-        diagLog("[MIC-4] capture started for \(deviceName)")
-    }
-
-    private func stopCapture(finishStream: Bool) {
-        let captureState = stateLock.withLock { () -> CaptureState in
-            CaptureState(
-                deviceID: captureDeviceID,
-                ioProcID: ioProcID,
-                format: inputFormat
-            )
-        }
-
-        if let deviceID = captureState.deviceID,
-           let ioProcID = captureState.ioProcID {
-            let stopStatus = AudioDeviceStop(deviceID, ioProcID)
-            if stopStatus != noErr {
-                diagLog("[MIC-STOP-FAIL] status=\(stopStatus)")
-            }
-        }
-
-        let pendingChunk = ioQueue.sync { () -> PendingPCMChunk? in
-            let chunk = accumulator?.flush()
-            accumulator = nil
-            return chunk
-        }
-
-        if let pendingChunk {
-            deliveryQueue.sync {
-                deliver(chunk: pendingChunk, format: captureState.format)
-            }
-        }
-        deliveryQueue.sync {}
-
-        if let deviceID = captureState.deviceID,
-           let ioProcID = captureState.ioProcID {
-            let destroyStatus = AudioDeviceDestroyIOProcID(deviceID, ioProcID)
-            if destroyStatus != noErr {
-                diagLog("[MIC-DESTROY-FAIL] status=\(destroyStatus)")
-            }
-        }
-
-        stateLock.withLock {
-            captureDeviceID = nil
-            ioProcID = nil
-            inputFormat = nil
-            accumulator = nil
-            deliveredChunkCount = 0
-        }
-
-        if finishStream {
-            let currentContinuation = continuationLock.withLock { () -> AsyncStream<CapturedAudioBuffer>.Continuation? in
-                let current = continuation
-                continuation = nil
-                return current
-            }
-            currentContinuation?.finish()
-        } else {
-            continuationLock.withLock {
-                continuation = nil
-            }
-        }
-
-        callbackLock.withLock {
-            onBuffer = nil
-        }
-        _audioLevel.value = 0
-    }
-
-    private func handleInputData(
-        _ inputData: UnsafePointer<AudioBufferList>,
-        inputTime: UnsafePointer<AudioTimeStamp>?,
-        fallbackTime: UnsafePointer<AudioTimeStamp>?
-    ) {
-        let capturedAt = Self.captureDate(inputTime: inputTime, fallbackTime: fallbackTime)
-        let pendingChunk = stateLock.withLock { accumulator?.append(inputData, capturedAt: capturedAt) }
-        guard let pendingChunk else { return }
-
-        deliveryQueue.async { [weak self] in
-            guard let self else { return }
-            let format = self.stateLock.withLock { self.inputFormat }
-            self.deliver(chunk: pendingChunk, format: format)
-        }
-    }
-
-    private func deliver(chunk: PendingPCMChunk, format: AVAudioFormat?) {
-        guard let format, let buffer = chunk.makePCMBuffer(format: format) else { return }
-
-        deliveredChunkCount += 1
-        let count = deliveredChunkCount
-        let rms = Self.normalizedRMS(from: buffer)
-        _audioLevel.value = min(rms * 25, 1.0)
-        if count <= 5 || count % 100 == 0 {
-            diagLog("[MIC-6] chunk #\(count): frames=\(buffer.frameLength) rms=\(rms) level=\(_audioLevel.value)")
-        }
-
-        let capturedBuffer = CapturedAudioBuffer(buffer: buffer, capturedAt: chunk.capturedAt)
-
-        let callback = callbackLock.withLock { onBuffer }
-        callback?(capturedBuffer)
-
-        let continuation = continuationLock.withLock { self.continuation }
-        _ = continuation?.yield(capturedBuffer)
-    }
-
-    private static func captureDate(
-        inputTime: UnsafePointer<AudioTimeStamp>?,
-        fallbackTime: UnsafePointer<AudioTimeStamp>?
-    ) -> Date {
-        let hostTimeValidFlag: UInt32 = 1 << 1
-
-        if let inputTime,
-           (inputTime.pointee.mFlags.rawValue & hostTimeValidFlag) != 0 {
-            return CaptureClock.date(forHostTime: inputTime.pointee.mHostTime)
-        }
-
-        if let fallbackTime,
-           (fallbackTime.pointee.mFlags.rawValue & hostTimeValidFlag) != 0 {
-            return CaptureClock.date(forHostTime: fallbackTime.pointee.mHostTime)
-        }
-
-        return Date()
-    }
-
-    private static func inputFormat(for deviceID: AudioDeviceID) throws -> AVAudioFormat {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyStreamFormat,
-            mScope: kAudioDevicePropertyScopeInput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var streamDescription = AudioStreamBasicDescription()
-        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        let status = AudioObjectGetPropertyData(
-            deviceID,
-            &address,
-            0, nil,
-            &size,
-            &streamDescription
-        )
-        guard status == noErr else {
-            throw CaptureError.formatQueryFailed(status: status)
-        }
-
-        guard streamDescription.mFormatID == kAudioFormatLinearPCM,
-              streamDescription.mSampleRate > 0,
-              streamDescription.mChannelsPerFrame > 0,
-              let format = AVAudioFormat(streamDescription: &streamDescription) else {
-            throw CaptureError.invalidInputFormat
-        }
-
-        return format
+        engine.stop()
+        let freshEngine = AVAudioEngine()
+        engine = freshEngine
+        return freshEngine
     }
 
     private static func normalizedRMS(from buffer: AVAudioPCMBuffer) -> Float {
@@ -278,65 +185,62 @@ final class MicCapture: @unchecked Sendable {
         guard frameLength > 0 else { return 0 }
 
         if let channelData = buffer.floatChannelData {
-            return rms(
-                frameLength: frameLength,
-                channelCount: channelCount
-            ) { frame, channel in
-                if buffer.format.isInterleaved {
-                    let stride = channelCount
-                    return channelData[0][(frame * stride) + channel]
+            if channelCount == 1 || buffer.format.isInterleaved {
+                let totalSamples = buffer.format.isInterleaved ? frameLength * channelCount : frameLength
+                var sum: Float = 0
+                for i in 0..<totalSamples {
+                    let s = channelData[0][i]
+                    sum += s * s
                 }
-                return channelData[channel][frame]
+                return sqrt(sum / Float(totalSamples))
+            } else {
+                var totalSum: Float = 0
+                for ch in 0..<channelCount {
+                    for i in 0..<frameLength {
+                        let s = channelData[ch][i]
+                        totalSum += s * s
+                    }
+                }
+                return sqrt(totalSum / Float(frameLength * channelCount))
             }
         }
 
         if let channelData = buffer.int16ChannelData {
             let scale: Float = 1 / Float(Int16.max)
-            return rms(
-                frameLength: frameLength,
-                channelCount: channelCount
-            ) { frame, channel in
-                if buffer.format.isInterleaved {
-                    let stride = channelCount
-                    return Float(channelData[0][(frame * stride) + channel]) * scale
-                }
-                return Float(channelData[channel][frame]) * scale
+            var sum: Float = 0
+            for i in 0..<frameLength {
+                let s = Float(channelData[0][i]) * scale
+                sum += s * s
             }
+            return sqrt(sum / Float(frameLength))
         }
 
         if let channelData = buffer.int32ChannelData {
             let scale: Float = 1 / Float(Int32.max)
-            return rms(
-                frameLength: frameLength,
-                channelCount: channelCount
-            ) { frame, channel in
-                if buffer.format.isInterleaved {
-                    let stride = channelCount
-                    return Float(channelData[0][(frame * stride) + channel]) * scale
-                }
-                return Float(channelData[channel][frame]) * scale
+            var sum: Float = 0
+            for i in 0..<frameLength {
+                let s = Float(channelData[0][i]) * scale
+                sum += s * s
             }
+            return sqrt(sum / Float(frameLength))
         }
 
         return 0
     }
 
-    private static func rms(
-        frameLength: Int,
-        channelCount: Int,
-        sampleAt: (_ frame: Int, _ channel: Int) -> Float
-    ) -> Float {
-        var sum: Float = 0
+    // MARK: - Hardware Sample Rate Query
 
-        for frame in 0..<frameLength {
-            for channel in 0..<channelCount {
-                let sample = sampleAt(frame, channel)
-                sum += sample * sample
-            }
-        }
-
-        let sampleCount = Float(frameLength * channelCount)
-        return sampleCount > 0 ? sqrt(sum / sampleCount) : 0
+    /// Query the nominal sample rate of a CoreAudio device directly from hardware.
+    static func deviceNominalSampleRate(for deviceID: AudioDeviceID) -> Double? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var sampleRate: Float64 = 0
+        var size = UInt32(MemoryLayout<Float64>.size)
+        let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &sampleRate)
+        return status == noErr ? sampleRate : nil
     }
 
     // MARK: - List available input devices
@@ -391,18 +295,24 @@ final class MicCapture: @unchecked Sendable {
             guard inputChannels > 0 else { continue }
 
             guard let name = deviceName(for: deviceID) else { continue }
+            let uid = deviceUID(for: deviceID) ?? ""
+            let transportType = deviceTransportType(for: deviceID)
+            guard !isExcludedInputDevice(name: name, uid: uid, transportType: transportType) else {
+                continue
+            }
             result.append((id: deviceID, name: name))
         }
 
         return result
     }
 
-    /// Resolve the device used when the app is left in automatic mode.
-    /// This prefers dedicated microphones over Bluetooth headset mics and
-    /// common virtual routing devices.
     static func automaticInputDeviceID() -> AudioDeviceID? {
         let devices = availableInputDevices()
         guard !devices.isEmpty else { return defaultInputDeviceID() }
+
+        if let builtInMicID = preferredBuiltInMicrophoneID(from: devices) {
+            return builtInMicID
+        }
 
         let defaultID = defaultInputDeviceID()
         let ranked = devices
@@ -435,7 +345,6 @@ final class MicCapture: @unchecked Sendable {
         deviceName(for: deviceID)
     }
 
-    /// Convert a CoreAudio AudioDeviceID to the UID string used by ScreenCaptureKit.
     static func deviceUID(for deviceID: AudioDeviceID) -> String? {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyDeviceUID,
@@ -499,200 +408,67 @@ final class MicCapture: @unchecked Sendable {
     ) -> Int {
         let lowered = deviceName.lowercased()
 
-        let strongPositiveKeywords = [
-            "microphone",
-            "built-in"
-        ]
-        let weakPositiveKeywords = [
-            "mic",
-            "input",
-            "headset"
-        ]
-        let negativeKeywords = [
-            "background music",
-            "ui sounds",
-            "zoomaudiodevice",
-            "loopback",
-            "blackhole",
-            "soundflower",
-            "virtual",
-            "bass"
-        ]
-
         var score = 0
 
-        if isOSDefault {
-            score += 20
-        }
+        if isOSDefault { score += 20 }
 
         switch transportType {
-        case kAudioDeviceTransportTypeBuiltIn:
-            score += 140
-        case kAudioDeviceTransportTypeUSB:
-            score += 100
-        case kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE:
-            score -= 80
-        case kAudioDeviceTransportTypeVirtual, kAudioDeviceTransportTypeAggregate, kAudioDeviceTransportTypeAutoAggregate:
-            score -= 160
-        default:
-            break
+        case kAudioDeviceTransportTypeBuiltIn: score += 140
+        case kAudioDeviceTransportTypeUSB: score += 100
+        case kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE: score -= 80
+        case kAudioDeviceTransportTypeVirtual, kAudioDeviceTransportTypeAggregate, kAudioDeviceTransportTypeAutoAggregate: score -= 160
+        default: break
         }
 
-        if strongPositiveKeywords.contains(where: lowered.contains) {
-            score += 120
-        }
-
-        if weakPositiveKeywords.contains(where: lowered.contains) {
-            score += 45
-        }
-
-        if negativeKeywords.contains(where: lowered.contains) {
-            score -= 120
-        }
-
-        if lowered.contains("airpods") || lowered.contains("buds") {
-            score -= 60
-        }
+        if ["microphone", "built-in"].contains(where: lowered.contains) { score += 120 }
+        if ["mic", "input", "headset"].contains(where: lowered.contains) { score += 45 }
+        if ["background music", "ui sounds", "zoomaudiodevice", "loopback", "blackhole", "soundflower", "virtual", "bass"].contains(where: lowered.contains) { score -= 120 }
+        if lowered.contains("airpods") || lowered.contains("buds") { score -= 60 }
 
         return score
     }
 
-    private struct CaptureState {
-        let deviceID: AudioDeviceID?
-        let ioProcID: AudioDeviceIOProcID?
-        let format: AVAudioFormat?
+    private static func preferredBuiltInMicrophoneID(
+        from devices: [(id: AudioDeviceID, name: String)]
+    ) -> AudioDeviceID? {
+        if let exactBuiltIn = devices.first(where: { deviceUID(for: $0.id) == "BuiltInMicrophoneDevice" }) {
+            return exactBuiltIn.id
+        }
+        if let macbookMic = devices.first(where: {
+            let lowered = $0.name.lowercased()
+            return lowered.contains("macbook") && lowered.contains("microphone")
+        }) {
+            return macbookMic.id
+        }
+        if let genericBuiltInMic = devices.first(where: {
+            deviceTransportType(for: $0.id) == kAudioDeviceTransportTypeBuiltIn &&
+                $0.name.lowercased().contains("microphone")
+        }) {
+            return genericBuiltInMic.id
+        }
+        return nil
     }
 
-    enum CaptureError: LocalizedError {
-        case noInputDevice
-        case formatQueryFailed(status: OSStatus)
-        case invalidInputFormat
-        case ioProcCreationFailed(status: OSStatus)
-        case startFailed(status: OSStatus)
+    private static func isExcludedInputDevice(
+        name: String,
+        uid: String,
+        transportType: UInt32?
+    ) -> Bool {
+        let loweredName = name.lowercased()
+        let loweredUID = uid.lowercased()
 
-        var errorDescription: String? {
-            switch self {
-            case .noInputDevice:
-                return "No input device is available for microphone capture."
-            case .formatQueryFailed(let status):
-                return "macOS could not read the input device format (\(status))."
-            case .invalidInputFormat:
-                return "macOS returned an unsupported input format for the microphone device."
-            case .ioProcCreationFailed(let status):
-                return "macOS could not attach an IO callback to the microphone device (\(status))."
-            case .startFailed(let status):
-                return "macOS could not start the microphone device (\(status))."
-            }
-        }
-    }
-}
-
-private struct PendingPCMChunk: Sendable {
-    let frameCount: Int
-    let bufferData: [Data]
-    let capturedAt: Date
-
-    func makePCMBuffer(format: AVAudioFormat) -> AVAudioPCMBuffer? {
-        guard let buffer = AVAudioPCMBuffer(
-            pcmFormat: format,
-            frameCapacity: AVAudioFrameCount(frameCount)
-        ) else {
-            return nil
+        if loweredName.contains("gelato system audio") || loweredUID.contains("com.gelato.system-audio") {
+            return true
         }
 
-        buffer.frameLength = AVAudioFrameCount(frameCount)
-        let destinationBuffers = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
-        guard destinationBuffers.count == bufferData.count else { return nil }
-
-        for index in destinationBuffers.indices {
-            let byteCount = bufferData[index].count
-            guard let destination = destinationBuffers[index].mData,
-                  byteCount <= Int(destinationBuffers[index].mDataByteSize) else {
-                return nil
-            }
-
-            bufferData[index].withUnsafeBytes { source in
-                if let sourceBaseAddress = source.baseAddress {
-                    memcpy(destination, sourceBaseAddress, byteCount)
-                }
-            }
-            destinationBuffers[index].mDataByteSize = UInt32(byteCount)
+        if transportType == kAudioDeviceTransportTypeAggregate || transportType == kAudioDeviceTransportTypeAutoAggregate,
+           !loweredName.contains("microphone"),
+           !loweredName.contains("mic"),
+           !loweredName.contains("headset") {
+            return true
         }
 
-        return buffer
-    }
-}
-
-private final class PCMChunkAccumulator {
-    private let targetFrameCount: Int
-    private let bytesPerFrame: Int
-    private let bufferCount: Int
-
-    private var bufferData: [Data]
-    private var accumulatedFrameCount = 0
-    private var chunkCapturedAt: Date?
-
-    init(format: AVAudioFormat, targetFrameCount: Int) throws {
-        let streamDescription = format.streamDescription.pointee
-        guard streamDescription.mBytesPerFrame > 0 else {
-            throw MicCapture.CaptureError.invalidInputFormat
-        }
-
-        self.targetFrameCount = targetFrameCount
-        self.bytesPerFrame = Int(streamDescription.mBytesPerFrame)
-        self.bufferCount = format.isInterleaved ? 1 : Int(format.channelCount)
-        self.bufferData = Array(repeating: Data(), count: bufferCount)
-    }
-
-    func append(_ inputData: UnsafePointer<AudioBufferList>, capturedAt: Date) -> PendingPCMChunk? {
-        let sourceBuffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
-        guard sourceBuffers.count == bufferCount else {
-            reset()
-            return nil
-        }
-
-        guard let frameCount = frameCount(for: sourceBuffers),
-              frameCount > 0 else {
-            return nil
-        }
-
-        if chunkCapturedAt == nil {
-            chunkCapturedAt = capturedAt
-        }
-
-        for index in sourceBuffers.indices {
-            let source = sourceBuffers[index]
-            let byteCount = Int(source.mDataByteSize)
-            guard let sourceData = source.mData, byteCount > 0 else { continue }
-            bufferData[index].append(sourceData.assumingMemoryBound(to: UInt8.self), count: byteCount)
-        }
-
-        accumulatedFrameCount += frameCount
-        guard accumulatedFrameCount >= targetFrameCount else { return nil }
-        return flush()
-    }
-
-    func flush() -> PendingPCMChunk? {
-        guard accumulatedFrameCount > 0, let chunkCapturedAt else { return nil }
-        let chunk = PendingPCMChunk(
-            frameCount: accumulatedFrameCount,
-            bufferData: bufferData,
-            capturedAt: chunkCapturedAt
-        )
-        reset()
-        return chunk
-    }
-
-    private func frameCount(for buffers: UnsafeMutableAudioBufferListPointer) -> Int? {
-        guard let first = buffers.first else { return nil }
-        guard Int(first.mDataByteSize) % bytesPerFrame == 0 else { return nil }
-        return Int(first.mDataByteSize) / bytesPerFrame
-    }
-
-    private func reset() {
-        accumulatedFrameCount = 0
-        bufferData = Array(repeating: Data(), count: bufferCount)
-        chunkCapturedAt = nil
+        return false
     }
 }
 

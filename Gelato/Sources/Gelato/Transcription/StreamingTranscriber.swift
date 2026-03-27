@@ -5,6 +5,7 @@ import os
 /// Consumes an audio buffer stream, detects speech via Silero VAD,
 /// and transcribes completed speech segments via Parakeet-TDT.
 final class StreamingTranscriber: @unchecked Sendable {
+    private static let multichannelMicGain: Float = 24
     private let asrManager: AsrManager
     private let vadManager: VadManager
     private let speaker: Speaker
@@ -15,8 +16,6 @@ final class StreamingTranscriber: @unchecked Sendable {
     private let onFinal: @Sendable (String, Date) -> Void
     private let log = Logger(subsystem: "com.opengranola", category: "StreamingTranscriber")
 
-    /// Resampler from source format to 16kHz mono Float32.
-    private var converter: AVAudioConverter?
     private let targetFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
         sampleRate: 16000,
@@ -181,58 +180,154 @@ final class StreamingTranscriber: @unchecked Sendable {
         let frameLength = Int(buffer.frameLength)
         guard frameLength > 0 else { return nil }
 
-        // Fast path: already Float32 at 16kHz (common for system audio from ScreenCaptureKit)
-        if sourceFormat.commonFormat == .pcmFormatFloat32 && sourceFormat.sampleRate == 16000 {
-            guard let channelData = buffer.floatChannelData else { return nil }
+        guard let monoFloatBuffer = monoFloatBuffer(from: buffer) else { return nil }
+
+        if monoFloatBuffer.format.sampleRate == targetFormat.sampleRate {
+            guard let channelData = monoFloatBuffer.floatChannelData else { return nil }
+            let samples = Array(UnsafeBufferPointer(
+                start: channelData[0],
+                count: Int(monoFloatBuffer.frameLength)
+            ))
+            return applyInputGain(to: samples, sourceChannelCount: Int(sourceFormat.channelCount))
+        }
+
+        return resampleMonoBuffer(
+            monoFloatBuffer,
+            sourceChannelCount: Int(sourceFormat.channelCount)
+        )
+    }
+
+    private func applyInputGain(to samples: [Float], sourceChannelCount: Int) -> [Float] {
+        let totalGain = inputGain * (sourceChannelCount > 2 ? Self.multichannelMicGain : 1)
+        guard totalGain != 1 else { return samples }
+
+        return samples.map { sample in
+            let amplified = sample * totalGain
+            return min(1, max(-1, amplified))
+        }
+    }
+
+    private func monoFloatBuffer(from buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        let sourceFormat = buffer.format
+        let monoFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sourceFormat.sampleRate,
+            channels: 1,
+            interleaved: false
+        )!
+        let frameLength = Int(buffer.frameLength)
+        guard frameLength > 0,
+              let outputBuffer = AVAudioPCMBuffer(
+                pcmFormat: monoFormat,
+                frameCapacity: buffer.frameLength
+              ) else {
+            return nil
+        }
+
+        outputBuffer.frameLength = buffer.frameLength
+        guard let destination = outputBuffer.floatChannelData?[0] else { return nil }
+
+        if sourceFormat.commonFormat == .pcmFormatFloat32,
+           let channelData = buffer.floatChannelData {
             if sourceFormat.channelCount == 1 {
-                // Mono — direct copy
-                let samples = Array(UnsafeBufferPointer(start: channelData[0], count: frameLength))
-                return applyInputGain(to: samples)
-            } else {
-                // Multi-channel — use the strongest channel so stereo output doesn't get diluted.
-                let channelCount = Int(sourceFormat.channelCount)
-                var bestChannel = 0
-                var bestEnergy: Float = -.greatestFiniteMagnitude
-
-                for channelIndex in 0..<channelCount {
-                    let channel = channelData[channelIndex]
-                    var energy: Float = 0
-                    for frameIndex in 0..<frameLength {
-                        let sample = channel[frameIndex]
-                        energy += sample * sample
-                    }
-
-                    if energy > bestEnergy {
-                        bestEnergy = energy
-                        bestChannel = channelIndex
-                    }
-                }
-
-                let samples = Array(UnsafeBufferPointer(start: channelData[bestChannel], count: frameLength))
-                return applyInputGain(to: samples)
+                destination.update(from: channelData[0], count: frameLength)
+                return outputBuffer
             }
+
+            let bestChannel = strongestChannelIndex(
+                channelData: channelData,
+                frameLength: frameLength,
+                channelCount: Int(sourceFormat.channelCount),
+                interleaved: sourceFormat.isInterleaved
+            )
+            copyChannel(
+                from: channelData,
+                to: destination,
+                frameLength: frameLength,
+                channelCount: Int(sourceFormat.channelCount),
+                interleaved: sourceFormat.isInterleaved,
+                channelIndex: bestChannel
+            )
+            return outputBuffer
         }
 
-        // Slow path: need to resample via AVAudioConverter
-        if converter == nil || converter?.inputFormat != sourceFormat {
-            converter = AVAudioConverter(from: sourceFormat, to: targetFormat)
+        let floatFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sourceFormat.sampleRate,
+            channels: sourceFormat.channelCount,
+            interleaved: false
+        )!
+        guard let floatConverter = AVAudioConverter(from: sourceFormat, to: floatFormat),
+              let floatBuffer = AVAudioPCMBuffer(
+                pcmFormat: floatFormat,
+                frameCapacity: buffer.frameLength + 32
+              ) else {
+            return nil
         }
-        guard let converter else { return nil }
 
-        let ratio = targetFormat.sampleRate / sourceFormat.sampleRate
-        let outputFrames = AVAudioFrameCount(Double(buffer.frameLength) * ratio)
-        guard outputFrames > 0 else { return nil }
+        var floatError: NSError?
+        var providedInput = false
+        floatConverter.reset()
+        floatConverter.convert(to: floatBuffer, error: &floatError) { _, outStatus in
+            if providedInput {
+                outStatus.pointee = .endOfStream
+                return nil
+            }
+            providedInput = true
+            outStatus.pointee = .haveData
+            return buffer
+        }
 
+        if let floatError {
+            log.error("Float conversion error: \(floatError.localizedDescription)")
+            return nil
+        }
+
+        guard let floatChannelData = floatBuffer.floatChannelData else { return nil }
+        if floatFormat.channelCount == 1 {
+            destination.update(from: floatChannelData[0], count: Int(floatBuffer.frameLength))
+            outputBuffer.frameLength = floatBuffer.frameLength
+            return outputBuffer
+        }
+
+        let bestChannel = strongestChannelIndex(
+            channelData: floatChannelData,
+            frameLength: Int(floatBuffer.frameLength),
+            channelCount: Int(floatFormat.channelCount),
+            interleaved: false
+        )
+        copyChannel(
+            from: floatChannelData,
+            to: destination,
+            frameLength: Int(floatBuffer.frameLength),
+            channelCount: Int(floatFormat.channelCount),
+            interleaved: false,
+            channelIndex: bestChannel
+        )
+        outputBuffer.frameLength = floatBuffer.frameLength
+        return outputBuffer
+    }
+
+    private func resampleMonoBuffer(
+        _ buffer: AVAudioPCMBuffer,
+        sourceChannelCount: Int
+    ) -> [Float]? {
+        let ratio = targetFormat.sampleRate / buffer.format.sampleRate
+        let outputFrames = AVAudioFrameCount(max(1, ceil(Double(buffer.frameLength) * ratio) + 32))
         guard let outputBuffer = AVAudioPCMBuffer(
             pcmFormat: targetFormat,
             frameCapacity: outputFrames
-        ) else { return nil }
+        ),
+        let converter = AVAudioConverter(from: buffer.format, to: targetFormat) else {
+            return nil
+        }
 
         var error: NSError?
         var consumed = false
+        converter.reset()
         converter.convert(to: outputBuffer, error: &error) { _, outStatus in
             if consumed {
-                outStatus.pointee = .noDataNow
+                outStatus.pointee = .endOfStream
                 return nil
             }
             consumed = true
@@ -250,15 +345,53 @@ final class StreamingTranscriber: @unchecked Sendable {
             start: channelData[0],
             count: Int(outputBuffer.frameLength)
         ))
-        return applyInputGain(to: samples)
+        return applyInputGain(to: samples, sourceChannelCount: sourceChannelCount)
     }
 
-    private func applyInputGain(to samples: [Float]) -> [Float] {
-        guard inputGain != 1 else { return samples }
+    private func strongestChannelIndex(
+        channelData: UnsafePointer<UnsafeMutablePointer<Float>>,
+        frameLength: Int,
+        channelCount: Int,
+        interleaved: Bool
+    ) -> Int {
+        var bestChannel = 0
+        var bestEnergy: Float = -.greatestFiniteMagnitude
 
-        return samples.map { sample in
-            let amplified = sample * inputGain
-            return min(1, max(-1, amplified))
+        for channelIndex in 0..<channelCount {
+            var energy: Float = 0
+            for frameIndex in 0..<frameLength {
+                let sample: Float
+                if interleaved {
+                    sample = channelData[0][(frameIndex * channelCount) + channelIndex]
+                } else {
+                    sample = channelData[channelIndex][frameIndex]
+                }
+                energy += sample * sample
+            }
+
+            if energy > bestEnergy {
+                bestEnergy = energy
+                bestChannel = channelIndex
+            }
+        }
+
+        return bestChannel
+    }
+
+    private func copyChannel(
+        from channelData: UnsafePointer<UnsafeMutablePointer<Float>>,
+        to destination: UnsafeMutablePointer<Float>,
+        frameLength: Int,
+        channelCount: Int,
+        interleaved: Bool,
+        channelIndex: Int
+    ) {
+        for frameIndex in 0..<frameLength {
+            if interleaved {
+                destination[frameIndex] = channelData[0][(frameIndex * channelCount) + channelIndex]
+            } else {
+                destination[frameIndex] = channelData[channelIndex][frameIndex]
+            }
         }
     }
 }

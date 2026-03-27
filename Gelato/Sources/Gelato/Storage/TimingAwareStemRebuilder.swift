@@ -81,12 +81,32 @@ enum TimingAwareStemRebuilder {
         let inputFile = try AVAudioFile(forReading: inputURL)
         let inputFormat = inputFile.processingFormat
         let outputSampleRate = targetSampleRate ?? max(inputFormat.sampleRate, 48_000)
-        let outputFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: outputSampleRate,
-            channels: inputFormat.channelCount,
-            interleaved: false
-        )!
+        let channelCount = inputFormat.channelCount
+        let outputFormat: AVAudioFormat
+        if channelCount > 2 {
+            let layoutTag = AudioChannelLayoutTag(kAudioChannelLayoutTag_DiscreteInOrder | UInt32(channelCount))
+            guard let layout = AVAudioChannelLayout(layoutTag: layoutTag) else {
+                diagLog("[AUDIO-REBUILD] cannot create output format for \(channelCount) channels, skipping rebuild")
+                return
+            }
+            outputFormat = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: outputSampleRate,
+                interleaved: false,
+                channelLayout: layout
+            )
+        } else {
+            guard let fmt = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: outputSampleRate,
+                channels: channelCount,
+                interleaved: false
+            ) else {
+                diagLog("[AUDIO-REBUILD] cannot create output format, skipping rebuild")
+                return
+            }
+            outputFormat = fmt
+        }
         let outputFile = try AVAudioFile(
             forWriting: outputURL,
             settings: outputFormat.settings,
@@ -285,12 +305,30 @@ enum TimingAwareStemRebuilder {
         _ buffer: AVAudioPCMBuffer,
         format: AVAudioFormat
     ) throws -> AVAudioPCMBuffer {
-        let floatFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: format.sampleRate,
-            channels: format.channelCount,
-            interleaved: false
-        )!
+        let channelCount = format.channelCount
+        let floatFormat: AVAudioFormat
+        if channelCount > 2 {
+            let layoutTag = AudioChannelLayoutTag(kAudioChannelLayoutTag_DiscreteInOrder | UInt32(channelCount))
+            guard let layout = AVAudioChannelLayout(layoutTag: layoutTag) else {
+                return buffer
+            }
+            floatFormat = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: format.sampleRate,
+                interleaved: false,
+                channelLayout: layout
+            )
+        } else {
+            guard let fmt = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: format.sampleRate,
+                channels: channelCount,
+                interleaved: false
+            ) else {
+                return buffer
+            }
+            floatFormat = fmt
+        }
         guard !formatsMatch(format, floatFormat) else { return buffer }
 
         guard let converter = AVAudioConverter(from: format, to: floatFormat),
