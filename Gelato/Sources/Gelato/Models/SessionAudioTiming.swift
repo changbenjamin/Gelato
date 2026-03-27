@@ -6,6 +6,8 @@ struct SessionAudioTiming: Codable, Sendable {
     let micChunks: [SessionAudioChunk]?
     let systemChunks: [SessionAudioChunk]?
     private static let chunkDiscontinuityThresholdSeconds: TimeInterval = 0.010
+    private static let sampleRateMismatchToleranceSeconds: TimeInterval = 0.015
+    private static let suspectedSampleRateMismatchRatio: Double = 0.3
 
     static func makeJSONEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()
@@ -46,21 +48,50 @@ struct SessionAudioTiming: Codable, Sendable {
         _ chunks: [SessionAudioChunk]?,
         sampleRate: Double
     ) -> Bool {
-        guard let chunks, chunks.count > 1, sampleRate > 0 else { return false }
+        let validChunks = self.validChunks(chunks)
+        guard validChunks.count > 1, sampleRate > 0 else { return false }
 
-        for index in 1..<chunks.count {
-            let previous = chunks[index - 1]
-            let current = chunks[index]
+        var discontinuityCount = 0
+        var sampleRateMismatchLikeCount = 0
+
+        for index in 1..<validChunks.count {
+            let previous = validChunks[index - 1]
+            let current = validChunks[index]
             let expectedDelta = Double(previous.frameCount) / sampleRate
             let measuredDelta = current.capturedAt.timeIntervalSince(previous.capturedAt)
-            let drift = abs(measuredDelta - expectedDelta)
+            let drift = measuredDelta - expectedDelta
 
-            if drift >= chunkDiscontinuityThresholdSeconds {
-                return true
+            if abs(drift) >= chunkDiscontinuityThresholdSeconds {
+                discontinuityCount += 1
+
+                let mismatchTolerance = max(
+                    sampleRateMismatchToleranceSeconds,
+                    expectedDelta * 0.25
+                )
+                if drift > 0,
+                   abs(drift - expectedDelta) <= mismatchTolerance {
+                    sampleRateMismatchLikeCount += 1
+                }
             }
         }
 
-        return false
+        guard discontinuityCount > 0 else { return false }
+
+        let transitionCount = validChunks.count - 1
+        let mismatchRatio = Double(sampleRateMismatchLikeCount) / Double(transitionCount)
+        if mismatchRatio >= suspectedSampleRateMismatchRatio {
+            diagLog(
+                "[AUDIO] ignoring chunk timing due to suspected sample-rate mismatch " +
+                "sampleRate=\(sampleRate) discontinuities=\(discontinuityCount)/\(transitionCount)"
+            )
+            return false
+        }
+
+        return true
+    }
+
+    static func validChunks(_ chunks: [SessionAudioChunk]?) -> [SessionAudioChunk] {
+        (chunks ?? []).filter { $0.frameCount > 0 }
     }
 
     static func offsetSeconds(

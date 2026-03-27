@@ -11,8 +11,8 @@ struct AudioSessionCard: View {
             if let audioFiles {
                 AudioFileCard(
                     title: "Session Audio",
-                    subtitle: "Play, reveal, or export the mixed session audio.",
-                    fileURL: audioFiles.combinedURL ?? audioFiles.micURL ?? audioFiles.systemURL
+                    subtitle: "Play or reveal the session audio.",
+                    fileURL: audioFiles.combinedURL ?? audioFiles.systemURL ?? audioFiles.micURL
                 )
             } else {
                 Text("Audio will appear here once the session recording is available.")
@@ -55,17 +55,8 @@ private struct AudioFileCard: View {
                     Button("Reveal in Finder") {
                         NSWorkspace.shared.activateFileViewerSelecting([fileURL])
                     }
-
-                    Button("Export...") {
-                        export(fileURL: fileURL)
-                    }
                 }
                 .buttonStyle(.bordered)
-
-                Text(fileURL.lastPathComponent)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(Color.warmTextMuted)
-                    .textSelection(.enabled)
             } else {
                 Text("Not available")
                     .font(.system(size: 12))
@@ -80,22 +71,5 @@ private struct AudioFileCard: View {
                 .stroke(Color.warmBorder, lineWidth: 1)
         }
         .clipShape(RoundedRectangle(cornerRadius: 14))
-    }
-
-    private func export(fileURL: URL) {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = fileURL.lastPathComponent
-        panel.canCreateDirectories = true
-        panel.begin { response in
-            guard response == .OK, let destination = panel.url else { return }
-            do {
-                if FileManager.default.fileExists(atPath: destination.path) {
-                    try FileManager.default.removeItem(at: destination)
-                }
-                try FileManager.default.copyItem(at: fileURL, to: destination)
-            } catch {
-                diagLog("[AUDIO-EXPORT-FAIL] \(error.localizedDescription)")
-            }
-        }
     }
 }

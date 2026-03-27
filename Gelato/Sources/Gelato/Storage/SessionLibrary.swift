@@ -2,8 +2,14 @@ import Foundation
 
 /// Manages the catalog of all recorded sessions on disk.
 actor SessionLibrary {
+    private static let generatedNotesHeading = "## AI-Generated Notes"
     private let sessionsDirectory: URL
     private let decoder = SessionAudioTiming.makeJSONDecoder()
+    private let sessionRecordEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }()
     private let meetingQAEncoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -24,23 +30,24 @@ actor SessionLibrary {
 
     /// Load all sessions from disk, sorted newest-first.
     func loadSessions() -> [SessionSummary] {
-        let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(at: sessionsDirectory, includingPropertiesForKeys: nil) else {
-            return []
+        migrateLegacyFlatSessionsIfNeeded()
+
+        let transcriptURLs = sessionTranscriptURLs().sorted { lhs, rhs in
+            lhs.lastPathComponent > rhs.lastPathComponent
         }
 
-        let jsonlFiles = files.filter { $0.pathExtension == "jsonl" }.sorted { $0.lastPathComponent > $1.lastPathComponent }
+        return transcriptURLs.compactMap { jsonlURL -> SessionSummary? in
+            guard let sessionID = SessionPaths.sessionID(from: jsonlURL.lastPathComponent) else {
+                return nil
+            }
 
-        return jsonlFiles.compactMap { jsonlURL -> SessionSummary? in
-            let stem = jsonlURL.deletingPathExtension().lastPathComponent
-            let metaURL = SessionMetadataIO.metadataURL(for: jsonlURL)
-
+            let metaURL = SessionPaths.metadataURL(in: sessionsDirectory, sessionID: sessionID)
             guard let metadata = try? SessionMetadataIO.read(from: metaURL) else {
                 return nil
             }
 
             return SessionSummary(
-                id: stem,
+                id: sessionID,
                 jsonlURL: jsonlURL,
                 metadataURL: metaURL,
                 metadata: metadata
@@ -48,9 +55,45 @@ actor SessionLibrary {
         }
     }
 
+    private func sessionTranscriptURLs() -> [URL] {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: sessionsDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        var transcriptURLsBySessionID: [String: URL] = [:]
+
+        for entry in entries {
+            let values = try? entry.resourceValues(forKeys: [.isDirectoryKey])
+
+            if values?.isDirectory == true,
+               let sessionID = SessionPaths.sessionID(from: entry.lastPathComponent) {
+                let transcriptURL = SessionPaths.transcriptURL(in: sessionsDirectory, sessionID: sessionID)
+                if fm.fileExists(atPath: transcriptURL.path) {
+                    transcriptURLsBySessionID[sessionID] = transcriptURL
+                }
+                continue
+            }
+
+            guard entry.pathExtension == "jsonl",
+                  let sessionID = SessionPaths.sessionID(from: entry.lastPathComponent),
+                  transcriptURLsBySessionID[sessionID] == nil else {
+                continue
+            }
+
+            transcriptURLsBySessionID[sessionID] = entry
+        }
+
+        return Array(transcriptURLsBySessionID.values)
+    }
+
     /// Load the full transcript from a JSONL file.
     func loadTranscript(for sessionID: String) -> [Utterance] {
-        let jsonlURL = sessionsDirectory.appendingPathComponent("\(sessionID).jsonl")
+        let jsonlURL = transcriptURL(for: sessionID)
         guard let data = try? Data(contentsOf: jsonlURL) else { return [] }
         guard let content = String(data: data, encoding: .utf8) else { return [] }
 
@@ -67,8 +110,7 @@ actor SessionLibrary {
 
     /// Update the title for a session.
     func updateTitle(for sessionID: String, newTitle: String) {
-        let jsonlURL = sessionsDirectory.appendingPathComponent("\(sessionID).jsonl")
-        let metaURL = SessionMetadataIO.metadataURL(for: jsonlURL)
+        let metaURL = metadataURL(for: sessionID)
 
         guard var metadata = try? SessionMetadataIO.read(from: metaURL) else { return }
         metadata.title = newTitle
@@ -80,6 +122,7 @@ actor SessionLibrary {
         let metaURL = SessionMetadataIO.metadataURL(for: jsonlURL)
         let stem = jsonlURL.deletingPathExtension().lastPathComponent
         let createdAt = SessionMetadataIO.parseDate(from: stem) ?? Date()
+        try? FileManager.default.createDirectory(at: jsonlURL.deletingLastPathComponent(), withIntermediateDirectories: true)
 
         let metadata = SessionMetadata(
             title: title,
@@ -95,7 +138,7 @@ actor SessionLibrary {
 
     /// Load the notes text for a session (plain .notes.txt sidecar).
     func loadNotes(for sessionID: String) -> String {
-        let notesURL = sessionsDirectory.appendingPathComponent("\(sessionID).notes.txt")
+        let notesURL = notesURL(for: sessionID)
         guard let data = try? Data(contentsOf: notesURL),
               let text = String(data: data, encoding: .utf8) else {
             return ""
@@ -103,14 +146,20 @@ actor SessionLibrary {
         return text
     }
 
+    func userNotes(for sessionID: String) -> String {
+        let notes = loadNotes(for: sessionID)
+        return splitNotes(notes).userNotes
+    }
+
     /// Save notes text for a session.
     func saveNotes(for sessionID: String, text: String) {
-        let notesURL = sessionsDirectory.appendingPathComponent("\(sessionID).notes.txt")
+        let notesURL = notesURL(for: sessionID)
+        try? FileManager.default.createDirectory(at: notesURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? text.write(to: notesURL, atomically: true, encoding: .utf8)
     }
 
     func loadMeetingQAConversation(for sessionID: String) -> MeetingQAConversation {
-        let conversationURL = sessionsDirectory.appendingPathComponent("\(sessionID).qa-chat.json")
+        let conversationURL = meetingQAURL(for: sessionID)
         guard let data = try? Data(contentsOf: conversationURL),
               let conversation = try? meetingQADecoder.decode(MeetingQAConversation.self, from: data) else {
             return .empty
@@ -119,23 +168,24 @@ actor SessionLibrary {
     }
 
     func saveMeetingQAConversation(for sessionID: String, conversation: MeetingQAConversation) {
-        let conversationURL = sessionsDirectory.appendingPathComponent("\(sessionID).qa-chat.json")
+        let conversationURL = meetingQAURL(for: sessionID)
+        try? FileManager.default.createDirectory(at: conversationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         guard let data = try? meetingQAEncoder.encode(conversation) else { return }
         try? data.write(to: conversationURL, options: .atomic)
     }
 
     func upsertGeneratedNotes(for sessionID: String, text: String) {
-        let notesURL = sessionsDirectory.appendingPathComponent("\(sessionID).notes.txt")
-        let existing = (try? String(contentsOf: notesURL, encoding: .utf8)) ?? ""
+        let notesURL = notesURL(for: sessionID)
+        let existing = loadNotes(for: sessionID)
+        let userNotes = splitNotes(existing).userNotes
         let generatedBlock = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let finalText: String
-        if existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            finalText = generatedBlock
-        } else {
-            finalText = existing.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n## AI-Generated Notes\n\n" + generatedBlock
-        }
+        let cleanedUserNotes = userNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sections = [cleanedUserNotes.isEmpty ? nil : cleanedUserNotes, generatedBlock.isEmpty ? nil : "\(Self.generatedNotesHeading)\n\n\(generatedBlock)"]
+            .compactMap { $0 }
+        let finalText = sections.joined(separator: "\n\n")
 
+        try? FileManager.default.createDirectory(at: notesURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? finalText.trimmingCharacters(in: .whitespacesAndNewlines).write(
             to: notesURL,
             atomically: true,
@@ -143,43 +193,60 @@ actor SessionLibrary {
         )
     }
 
+    func replaceTranscript(for sessionID: String, utterances: [Utterance]) {
+        let jsonlURL = transcriptURL(for: sessionID)
+        try? FileManager.default.createDirectory(at: jsonlURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        let records = utterances.map {
+            SessionRecord(speaker: $0.speaker, text: $0.text, timestamp: $0.timestamp)
+        }
+
+        do {
+            let data = try records.reduce(into: Data()) { partialResult, record in
+                partialResult.append(try sessionRecordEncoder.encode(record))
+                partialResult.append(Data("\n".utf8))
+            }
+            try data.write(to: jsonlURL, options: .atomic)
+        } catch {
+            diagLog("[TRANSCRIPT-WRITE-FAIL] \(sessionID): \(error.localizedDescription)")
+        }
+    }
+
     func audioFiles(for sessionID: String) -> SessionAudioFiles? {
-        let combinedURL = sessionsDirectory.appendingPathComponent("\(sessionID)_combined.m4a")
-        let micURL = sessionsDirectory.appendingPathComponent("\(sessionID)_you.caf")
-        let systemURL = sessionsDirectory.appendingPathComponent("\(sessionID)_them.caf")
+        let combinedMP4URL = combinedAudioOutputURL(for: sessionID)
+        let combinedLegacyM4AURL = SessionPaths.legacyCombinedAudioURL(in: sessionsDirectory, sessionID: sessionID)
+        let micURL = SessionPaths.micAudioURL(in: sessionsDirectory, sessionID: sessionID)
+        let systemURL = SessionPaths.systemAudioURL(in: sessionsDirectory, sessionID: sessionID)
 
         let fm = FileManager.default
-        let hasCombined = fm.fileExists(atPath: combinedURL.path)
+        let hasCombinedMP4 = fm.fileExists(atPath: combinedMP4URL.path)
+        let hasCombinedLegacyM4A = fm.fileExists(atPath: combinedLegacyM4AURL.path)
         let hasMic = fm.fileExists(atPath: micURL.path)
         let hasSystem = fm.fileExists(atPath: systemURL.path)
-        guard hasCombined || hasMic || hasSystem else { return nil }
+        guard hasCombinedMP4 || hasCombinedLegacyM4A || hasMic || hasSystem else { return nil }
 
         return SessionAudioFiles(
-            combinedURL: hasCombined ? combinedURL : nil,
+            combinedURL: hasCombinedMP4 ? combinedMP4URL : (hasCombinedLegacyM4A ? combinedLegacyM4AURL : nil),
             micURL: hasMic ? micURL : nil,
             systemURL: hasSystem ? systemURL : nil
         )
     }
 
     func audioTiming(for sessionID: String) -> SessionAudioTiming? {
-        let timingURL = sessionsDirectory.appendingPathComponent("\(sessionID).audio-timing.json")
+        let timingURL = SessionPaths.audioTimingURL(in: sessionsDirectory, sessionID: sessionID)
         guard let data = try? Data(contentsOf: timingURL) else { return nil }
         return try? decoder.decode(SessionAudioTiming.self, from: data)
     }
 
     func combinedAudioOutputURL(for sessionID: String) -> URL {
-        sessionsDirectory.appendingPathComponent("\(sessionID)_combined.m4a")
+        SessionPaths.combinedAudioURL(in: sessionsDirectory, sessionID: sessionID)
     }
 
     /// Generate .meta.json for any existing .jsonl files that lack one (migration).
     /// Also re-generates metadata that is missing the wordCount field.
     func backfillMissingMetadata() {
-        let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(at: sessionsDirectory, includingPropertiesForKeys: nil) else {
-            return
-        }
-
-        let jsonlFiles = files.filter { $0.pathExtension == "jsonl" }
+        migrateLegacyFlatSessionsIfNeeded()
+        let jsonlFiles = sessionTranscriptURLs()
 
         for jsonlURL in jsonlFiles {
             let metaURL = SessionMetadataIO.metadataURL(for: jsonlURL)
@@ -234,6 +301,64 @@ actor SessionLibrary {
                 durationSeconds: duration
             )
             try? SessionMetadataIO.write(metadata, to: metaURL)
+        }
+    }
+
+    private func transcriptURL(for sessionID: String) -> URL {
+        SessionPaths.transcriptURL(in: sessionsDirectory, sessionID: sessionID)
+    }
+
+    private func metadataURL(for sessionID: String) -> URL {
+        SessionPaths.metadataURL(in: sessionsDirectory, sessionID: sessionID)
+    }
+
+    private func notesURL(for sessionID: String) -> URL {
+        SessionPaths.notesURL(in: sessionsDirectory, sessionID: sessionID)
+    }
+
+    private func meetingQAURL(for sessionID: String) -> URL {
+        SessionPaths.meetingQAURL(in: sessionsDirectory, sessionID: sessionID)
+    }
+
+    private func splitNotes(_ text: String) -> (userNotes: String, generatedNotes: String?) {
+        guard let headingRange = text.range(of: Self.generatedNotesHeading) else {
+            return (text.trimmingCharacters(in: .whitespacesAndNewlines), nil)
+        }
+
+        let userNotes = String(text[..<headingRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let generatedNotes = String(text[headingRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (userNotes, generatedNotes.isEmpty ? nil : generatedNotes)
+    }
+
+    private func migrateLegacyFlatSessionsIfNeeded() {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: sessionsDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+
+        for entry in entries {
+            let values = try? entry.resourceValues(forKeys: [.isDirectoryKey])
+            guard values?.isDirectory != true,
+                  let sessionID = SessionPaths.sessionID(from: entry.lastPathComponent) else {
+                continue
+            }
+
+            let sessionDirectory = SessionPaths.sessionDirectory(in: sessionsDirectory, sessionID: sessionID)
+            let destinationURL = sessionDirectory.appendingPathComponent(entry.lastPathComponent)
+
+            try? fm.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
+            guard !fm.fileExists(atPath: destinationURL.path) else { continue }
+
+            do {
+                try fm.moveItem(at: entry, to: destinationURL)
+                diagLog("[SESSION-MIGRATE] moved \(entry.lastPathComponent) to \(sessionID)/")
+            } catch {
+                diagLog("[SESSION-MIGRATE-FAIL] \(entry.lastPathComponent): \(error.localizedDescription)")
+            }
         }
     }
 }

@@ -32,23 +32,51 @@ enum OpenAIDiarizationInputBuilder {
         sessionID: String
     ) throws -> URL? {
         guard audioFiles.micURL != nil || audioFiles.systemURL != nil else { return nil }
+        var temporaryURLs: [URL] = []
+        defer {
+            for temporaryURL in temporaryURLs {
+                try? FileManager.default.removeItem(at: temporaryURL)
+            }
+        }
 
         let sessionStart = SessionMetadataIO.parseDate(from: sessionID) ?? Date()
         let earliestStart = [audioTiming?.micFirstBufferAt, audioTiming?.systemFirstBufferAt, sessionStart]
             .compactMap { $0 }
             .min() ?? sessionStart
+        let micChunks = SessionAudioTiming.validChunks(audioTiming?.micChunks)
+        let systemChunks = SessionAudioTiming.validChunks(audioTiming?.systemChunks)
+        let preparedMic = try TimingAwareStemRebuilder.prepareSource(
+            from: audioFiles.micURL,
+            chunks: micChunks,
+            streamStart: audioTiming?.micFirstBufferAt,
+            targetSampleRate: targetSampleRate,
+            temporaryBasename: "\(sessionID)-mic-upload"
+        )
+        let preparedSystem = try TimingAwareStemRebuilder.prepareSource(
+            from: audioFiles.systemURL,
+            chunks: systemChunks,
+            streamStart: audioTiming?.systemFirstBufferAt,
+            targetSampleRate: targetSampleRate,
+            temporaryBasename: "\(sessionID)-system-upload"
+        )
+        if preparedMic?.isRebuilt == true, let preparedMic {
+            temporaryURLs.append(preparedMic.url)
+        }
+        if preparedSystem?.isRebuilt == true, let preparedSystem {
+            temporaryURLs.append(preparedSystem.url)
+        }
 
-        let micSource = try loadSource(from: audioFiles.micURL)
-        let systemSource = try loadSource(from: audioFiles.systemURL)
+        let micSource = try loadSource(from: preparedMic?.url ?? audioFiles.micURL)
+        let systemSource = try loadSource(from: preparedSystem?.url ?? audioFiles.systemURL)
         let gains = mixingGains(micSource: micSource, systemSource: systemSource)
         let micShouldUseChunkTiming = SessionAudioTiming.shouldUseChunkTiming(
-            audioTiming?.micChunks,
+            micChunks,
             sampleRate: micSource?.sampleRate ?? 0
-        )
+        ) && preparedMic?.isRebuilt != true
         let systemShouldUseChunkTiming = SessionAudioTiming.shouldUseChunkTiming(
-            audioTiming?.systemChunks,
+            systemChunks,
             sampleRate: systemSource?.sampleRate ?? 0
-        )
+        ) && preparedSystem?.isRebuilt != true
 
         guard micSource != nil || systemSource != nil else { return nil }
 
@@ -56,14 +84,14 @@ enum OpenAIDiarizationInputBuilder {
             projectedLength(
                 source: micSource,
                 firstBufferAt: audioTiming?.micFirstBufferAt ?? sessionStart,
-                chunks: audioTiming?.micChunks,
+                chunks: micChunks,
                 earliestStart: earliestStart,
                 useChunkTiming: micShouldUseChunkTiming
             ),
             projectedLength(
                 source: systemSource,
                 firstBufferAt: audioTiming?.systemFirstBufferAt ?? sessionStart,
-                chunks: audioTiming?.systemChunks,
+                chunks: systemChunks,
                 earliestStart: earliestStart,
                 useChunkTiming: systemShouldUseChunkTiming
             )
@@ -77,7 +105,7 @@ enum OpenAIDiarizationInputBuilder {
             source: micSource,
             into: &micMix,
             firstBufferAt: audioTiming?.micFirstBufferAt ?? sessionStart,
-            chunks: audioTiming?.micChunks,
+            chunks: micChunks,
             earliestStart: earliestStart,
             gain: gains.mic,
             useChunkTiming: micShouldUseChunkTiming
@@ -86,7 +114,7 @@ enum OpenAIDiarizationInputBuilder {
             source: systemSource,
             into: &systemMix,
             firstBufferAt: audioTiming?.systemFirstBufferAt ?? sessionStart,
-            chunks: audioTiming?.systemChunks,
+            chunks: systemChunks,
             earliestStart: earliestStart,
             gain: gains.system,
             useChunkTiming: systemShouldUseChunkTiming
@@ -134,15 +162,17 @@ enum OpenAIDiarizationInputBuilder {
 
         var samples: [Float] = []
 
-        while true {
+        while inputFile.framePosition < inputFile.length {
+            let remainingFrames = inputFile.length - inputFile.framePosition
+            let frameCount = AVAudioFrameCount(min(Int64(inputFrameCapacity), remainingFrames))
             guard let inputBuffer = AVAudioPCMBuffer(
                 pcmFormat: sourceFormat,
-                frameCapacity: inputFrameCapacity
+                frameCapacity: frameCount
             ) else {
                 break
             }
 
-            try inputFile.read(into: inputBuffer, frameCount: inputFrameCapacity)
+            try inputFile.read(into: inputBuffer, frameCount: frameCount)
             if inputBuffer.frameLength == 0 { break }
 
             let floatBuffer: AVAudioPCMBuffer
@@ -291,8 +321,9 @@ enum OpenAIDiarizationInputBuilder {
     ) -> Int {
         guard let source else { return 0 }
 
-        if let chunks, !chunks.isEmpty, useChunkTiming {
-            return chunks.reduce(0) { partialResult, chunk in
+        let validChunks = SessionAudioTiming.validChunks(chunks)
+        if !validChunks.isEmpty, useChunkTiming {
+            return validChunks.reduce(0) { partialResult, chunk in
                 let chunkOffset = targetOffset(
                     for: chunk.capturedAt,
                     earliestStart: earliestStart,
@@ -328,10 +359,11 @@ enum OpenAIDiarizationInputBuilder {
     ) {
         guard let source else { return }
 
-        if let chunks, !chunks.isEmpty, useChunkTiming {
+        let validChunks = SessionAudioTiming.validChunks(chunks)
+        if !validChunks.isEmpty, useChunkTiming {
             var sourceIndex = 0
 
-            for chunk in chunks {
+            for chunk in validChunks {
                 guard sourceIndex < source.samples.count else { break }
 
                 let sourceCount = min(chunk.frameCount, source.samples.count - sourceIndex)
@@ -351,7 +383,7 @@ enum OpenAIDiarizationInputBuilder {
             return
         }
 
-        if let chunks, !chunks.isEmpty, !useChunkTiming {
+        if !validChunks.isEmpty, !useChunkTiming {
             diagLog("[OPENAI-UPLOAD] coarse chunk timing detected, mixing contiguous stem")
         }
 
@@ -434,7 +466,8 @@ enum OpenAIDiarizationInputBuilder {
     }
 
     private static func targetFrameCount(sourceFrameCount: Int, sourceRate: Double) -> Int {
-        max(1, Int(ceil(Double(sourceFrameCount) * (targetSampleRate / sourceRate))))
+        guard sourceFrameCount > 0, sourceRate > 0 else { return 0 }
+        return Int(ceil(Double(sourceFrameCount) * (targetSampleRate / sourceRate)))
     }
 
     private static func accumulate(
@@ -468,17 +501,18 @@ enum OpenAIDiarizationInputBuilder {
     }
 
     private static func writeWAV(samples: [Float], to url: URL) throws {
-        let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: targetSampleRate,
-            AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsFloatKey: false,
-            AVLinearPCMIsBigEndianKey: false
-        ]
-
-        let outputFile = try AVAudioFile(forWriting: url, settings: settings)
-        let outputFormat = outputFile.processingFormat
+        let outputFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: targetSampleRate,
+            channels: 1,
+            interleaved: false
+        )!
+        let outputFile = try AVAudioFile(
+            forWriting: url,
+            settings: outputFormat.settings,
+            commonFormat: outputFormat.commonFormat,
+            interleaved: outputFormat.isInterleaved
+        )
         let chunkSize = 16_384
         var index = 0
 
@@ -492,11 +526,10 @@ enum OpenAIDiarizationInputBuilder {
             }
 
             buffer.frameLength = AVAudioFrameCount(count)
-            guard let channelData = buffer.int16ChannelData?[0] else { break }
+            guard let channelData = buffer.floatChannelData?[0] else { break }
 
             for sampleIndex in 0..<count {
-                let sample = min(1, max(-1, samples[index + sampleIndex]))
-                channelData[sampleIndex] = Int16(sample * Float(Int16.max))
+                channelData[sampleIndex] = min(1, max(-1, samples[index + sampleIndex]))
             }
 
             try outputFile.write(from: buffer)

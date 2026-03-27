@@ -27,6 +27,12 @@ enum SessionAudioMixer {
         guard micURL != nil || systemURL != nil else { return nil }
 
         try? FileManager.default.removeItem(at: outputURL)
+        var temporaryURLs: [URL] = []
+        defer {
+            for temporaryURL in temporaryURLs {
+                try? FileManager.default.removeItem(at: temporaryURL)
+            }
+        }
 
         let composition = AVMutableComposition()
         let combinedOrigin = [audioTiming?.micFirstBufferAt, audioTiming?.systemFirstBufferAt]
@@ -34,38 +40,56 @@ enum SessionAudioMixer {
             .min()
 
         if let micURL {
-            try await insertTrack(
+            let preparedMic = try TimingAwareStemRebuilder.prepareSource(
                 from: micURL,
+                chunks: audioTiming?.micChunks,
+                streamStart: audioTiming?.micFirstBufferAt,
+                temporaryBasename: "\(outputURL.deletingPathExtension().lastPathComponent)-mic"
+            )
+            if preparedMic?.isRebuilt == true, let preparedMic {
+                temporaryURLs.append(preparedMic.url)
+            }
+            try await insertTrack(
+                from: preparedMic?.url ?? micURL,
                 into: composition,
                 at: insertionTime(
                     for: audioTiming?.micFirstBufferAt,
                     relativeTo: combinedOrigin,
                     trustRoundedOffsets: false
                 ),
-                chunks: audioTiming?.micChunks,
-                streamStart: audioTiming?.micFirstBufferAt
+                chunks: preparedMic?.isRebuilt == true ? nil : audioTiming?.micChunks,
+                streamStart: preparedMic?.isRebuilt == true ? nil : audioTiming?.micFirstBufferAt
             )
         }
 
         if let systemURL {
-            try await insertTrack(
+            let preparedSystem = try TimingAwareStemRebuilder.prepareSource(
                 from: systemURL,
+                chunks: audioTiming?.systemChunks,
+                streamStart: audioTiming?.systemFirstBufferAt,
+                temporaryBasename: "\(outputURL.deletingPathExtension().lastPathComponent)-system"
+            )
+            if preparedSystem?.isRebuilt == true, let preparedSystem {
+                temporaryURLs.append(preparedSystem.url)
+            }
+            try await insertTrack(
+                from: preparedSystem?.url ?? systemURL,
                 into: composition,
                 at: insertionTime(
                     for: audioTiming?.systemFirstBufferAt,
                     relativeTo: combinedOrigin,
                     trustRoundedOffsets: false
                 ),
-                chunks: audioTiming?.systemChunks,
-                streamStart: audioTiming?.systemFirstBufferAt
+                chunks: preparedSystem?.isRebuilt == true ? nil : audioTiming?.systemChunks,
+                streamStart: preparedSystem?.isRebuilt == true ? nil : audioTiming?.systemFirstBufferAt
             )
         }
 
-        guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetAppleM4A) else {
+        guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
             return nil
         }
 
-        try await exporter.export(to: outputURL, as: .m4a)
+        try await exporter.export(to: outputURL, as: .mp4)
 
         return outputURL
     }
@@ -87,16 +111,17 @@ enum SessionAudioMixer {
         }
 
         let audioFile = try AVAudioFile(forReading: url)
+        let validChunks = SessionAudioTiming.validChunks(chunks)
         let useChunkTiming = SessionAudioTiming.shouldUseChunkTiming(
-            chunks,
+            validChunks,
             sampleRate: audioFile.processingFormat.sampleRate
         )
 
-        if let chunks, !chunks.isEmpty, let streamStart, useChunkTiming {
+        if !validChunks.isEmpty, let streamStart, useChunkTiming {
             let sampleRate = audioFile.processingFormat.sampleRate
             var sourceCursor: Double = 0
 
-            for chunk in chunks {
+            for chunk in validChunks {
                 let chunkDurationSeconds = Double(chunk.frameCount) / sampleRate
                 let chunkDuration = CMTime(
                     seconds: chunkDurationSeconds,
@@ -119,7 +144,7 @@ enum SessionAudioMixer {
             return
         }
 
-        if let chunks, !chunks.isEmpty {
+        if !validChunks.isEmpty {
             diagLog("[AUDIO] steady chunk timing detected for \(url.lastPathComponent), inserting contiguous track")
         }
 

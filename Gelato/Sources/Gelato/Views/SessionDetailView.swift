@@ -40,6 +40,7 @@ struct DetailTabPicker: View {
                                 }
                             }
                         )
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
@@ -61,6 +62,9 @@ struct SessionDetailView: View {
     @State private var utterances: [Utterance] = []
     @State private var notesMarkdown = ""
     @State private var isLoading = true
+    @State private var isRegenerating = false
+    @State private var hasSessionAudio = false
+    @State private var regenerationErrorMessage: String?
     @State private var selectedTab: DetailTab = .notes
     @StateObject private var meetingQAStore = MeetingQAStore()
     @FocusState private var isTitleFocused: Bool
@@ -118,6 +122,33 @@ struct SessionDetailView: View {
                 Spacer()
 
                 Button {
+                    regenerateTranscriptAndNotes()
+                } label: {
+                    HStack(spacing: 6) {
+                        if isRegenerating {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text("Regenerate")
+                            .font(.system(size: 11))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule()
+                            .fill(Color.warmCardBg)
+                    )
+                    .foregroundStyle(Color.warmTextMuted)
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.warmTextMuted.opacity(0.75), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(!canRegenerateCurrentSession)
+                .help(regenerateButtonHelp)
+
+                Button {
                     copyCurrentTab()
                 } label: {
                     HStack(spacing: 4) {
@@ -130,7 +161,7 @@ struct SessionDetailView: View {
                     .padding(.vertical, 6)
                     .background(
                         Capsule()
-                            .fill(Color.warmSidebarBg)
+                            .fill(Color.warmCardBg)
                     )
                     .foregroundStyle(Color.warmTextMuted)
                     .overlay(
@@ -161,17 +192,7 @@ struct SessionDetailView: View {
         .background(Color.warmBackground)
         .task(id: session.id) {
             editableTitle = session.metadata.title
-            let loaded = await library.loadTranscript(for: session.id)
-            notesMarkdown = await library.loadNotes(for: session.id)
-            utterances = loaded
-            await meetingQAStore.prepare(
-                sessionID: session.id,
-                sessionTitle: editableTitle,
-                utterances: loaded,
-                library: library,
-                apiKey: openAIAPIKey
-            )
-            isLoading = false
+            await reloadSessionContent()
         }
         .onChange(of: editableTitle) {
             // Auto-save title on every change (debounced)
@@ -189,6 +210,17 @@ struct SessionDetailView: View {
                 library: library,
                 apiKey: openAIAPIKey
             )
+        }
+        .alert(
+            "Couldn't Regenerate",
+            isPresented: Binding(
+                get: { regenerationErrorMessage != nil },
+                set: { if !$0 { regenerationErrorMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(regenerationErrorMessage ?? "")
         }
     }
 
@@ -300,6 +332,22 @@ struct SessionDetailView: View {
         }
     }
 
+    private var canRegenerateCurrentSession: Bool {
+        !isRegenerating &&
+            hasSessionAudio &&
+            !openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var regenerateButtonHelp: String {
+        if openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Add an OpenAI API key to regenerate the transcript and notes."
+        }
+        if !hasSessionAudio {
+            return "This session doesn’t have saved audio to regenerate from."
+        }
+        return "Regenerate the transcript and notes from the saved session audio."
+    }
+
     private func copyCurrentTab() {
         switch selectedTab {
         case .notes:
@@ -322,5 +370,83 @@ struct SessionDetailView: View {
     private func copyToPasteboard(_ string: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(string, forType: .string)
+    }
+
+    private func regenerateTranscriptAndNotes() {
+        guard canRegenerateCurrentSession else { return }
+
+        let currentTitle = editableTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sessionTitle = currentTitle.isEmpty ? session.metadata.title : currentTitle
+        regenerationErrorMessage = nil
+        isRegenerating = true
+
+        Task {
+            await SessionFinalizer.generateCombinedAudioIfPossible(
+                sessionID: session.id,
+                library: library
+            )
+
+            let transcriptResult = await SessionFinalizer.finalizeDiarizedTranscript(
+                sessionID: session.id,
+                sessionURL: session.jsonlURL,
+                sessionTitle: sessionTitle,
+                apiKey: openAIAPIKey,
+                library: library
+            )
+
+            guard transcriptResult.didFinalize else {
+                let message = transcriptResult.errorMessage
+                    ?? "Gelato couldn’t regenerate a transcript for this session."
+                regenerationErrorMessage = message
+                isRegenerating = false
+                return
+            }
+
+            let notesResult = await SessionFinalizer.generateNotesIfPossible(
+                sessionID: session.id,
+                sessionTitle: sessionTitle,
+                apiKey: openAIAPIKey,
+                library: library
+            )
+
+            if let generatedTitle = notesResult.generatedTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !generatedTitle.isEmpty {
+                await library.updateTitle(for: session.id, newTitle: generatedTitle)
+            }
+
+            await listModel.refresh()
+            await reloadSessionContent()
+
+            if let errorMessage = notesResult.errorMessage {
+                regenerationErrorMessage = errorMessage
+            }
+            isRegenerating = false
+        }
+    }
+
+    private func reloadSessionContent() async {
+        let loadedTranscript = await library.loadTranscript(for: session.id)
+        let loadedNotes = await library.loadNotes(for: session.id)
+        let hasAudioFiles = await library.audioFiles(for: session.id) != nil
+        let refreshedTitle = await refreshedSessionTitle()
+
+        editableTitle = refreshedTitle
+        notesMarkdown = loadedNotes
+        utterances = loadedTranscript
+        hasSessionAudio = hasAudioFiles
+
+        await meetingQAStore.prepare(
+            sessionID: session.id,
+            sessionTitle: refreshedTitle,
+            utterances: loadedTranscript,
+            library: library,
+            apiKey: openAIAPIKey
+        )
+        isLoading = false
+    }
+
+    private func refreshedSessionTitle() async -> String {
+        let refreshedSessions = await library.loadSessions()
+        return refreshedSessions.first(where: { $0.id == session.id })?.metadata.title ?? session.metadata.title
     }
 }

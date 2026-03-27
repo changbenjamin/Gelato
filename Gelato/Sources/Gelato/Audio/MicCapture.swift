@@ -431,6 +431,10 @@ final class MicCapture: @unchecked Sendable {
         return deviceName(for: id)
     }
 
+    static func inputDeviceName(for deviceID: AudioDeviceID) -> String? {
+        deviceName(for: deviceID)
+    }
+
     /// Convert a CoreAudio AudioDeviceID to the UID string used by ScreenCaptureKit.
     static func deviceUID(for deviceID: AudioDeviceID) -> String? {
         var address = AudioObjectPropertyAddress(

@@ -80,6 +80,8 @@ struct OpenAINotesService {
 
         5. Write for someone who wasn't in the room. The notes should allow a colleague who missed the meeting to understand what happened, what was decided, what's still open, and what they need to do — without needing to ask follow-up questions.
 
+        6. Treat speaker labels as roles, not names. The transcript may use labels like "You" and "Them" to distinguish the user from the other participant. These are not literal names and should never be written as quoted character names. If no real name is known, refer to the speakers naturally as "you" and "they," or "the other caller/participant" where needed for clarity.
+
         ## Output structure
 
         Use the following structure. Omit any section that has no relevant content — do not include empty sections or placeholder text.
@@ -96,17 +98,19 @@ struct OpenAINotesService {
         - Note where there was disagreement or uncertainty.
         - Keep it dense but readable — favor concise paragraphs and short bullets over walls of text.
 
-        ### Action Items, if relevant/necessary
+        ### Action Items (ONLY ADD THIS SECTION IF RELEVANT/NECESSARY)
         Bulleted list. Each entry includes: what needs to be done, who owns it, and the deadline if one was stated. If no deadline was given, write "[no deadline stated]." If the owner is ambiguous, write "[owner TBD]."
 
         ## Formatting rules
 
-        - Use **bold** for names the first time they appear in a section, and for key terms or decisions that a skimmer should catch.
+        - Use **bold** very sparingly. Only bold a small number of genuinely important words or phrases that need to pop for a skimmer. Most paragraphs and bullets should contain no bolding at all.
+        - Do not bold speaker labels like "You" or "Them", and do not write them as quoted names.
         - Use exact quotes sparingly — only when the specific wording matters (e.g., a commitment, a contentious statement, a memorable framing).
+        - Keep quoted material in quotation marks. Quoted text does not need to be bold unless the wording is exceptionally important.
         - Do not editorialize or add your own opinions.
         - Do not pad with filler language. Every sentence should carry information.
         - If the audio quality was poor or a section of transcript is garbled, note it: "[inaudible/unclear ~2 min mark]" rather than guessing.
-        - Refer to participants by their first name after the first full-name mention, or matching how they were addressed in the meeting.
+        - Refer to participants by their first name after the first full-name mention, or matching how they were addressed in the meeting. If no name is known, use natural role language like "you" and "they" instead of invented names.
 
         Also produce a short descriptive title, 5 to 6 words maximum.
         Do not include any date, day of week, or time in the title.
@@ -123,6 +127,7 @@ struct OpenAINotesService {
 
         Meeting context:
         - Meeting title: \(sessionTitle)
+        - Transcript speaker labels: "You" means the user. "Them" means the other caller or participant. These are role labels, not names.
 
         User notes typed during the meeting:
         \(userNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "[none]" : userNotes)

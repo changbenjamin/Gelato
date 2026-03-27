@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct ContentView: View {
+    private let collapsedSidebarNewNoteInset: CGFloat = 18
+
     @Bindable var settings: AppSettings
 
     // Transcription state
@@ -20,6 +22,7 @@ struct ContentView: View {
     @State private var sessionLibrary = SessionLibrary()
     @State private var sessionListModel: SessionListModel?
     @State private var selectedSession: SessionSummary?
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var liveSessionTitle: String = ""
     @State private var sessionStartTime: Date?
     @State private var liveSessionID: String?
@@ -29,7 +32,7 @@ struct ContentView: View {
     @State private var showOnboarding = false
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             // Sidebar
             SessionListView(
                 listModel: sessionListModel ?? SessionListModel(library: sessionLibrary),
@@ -39,6 +42,7 @@ struct ContentView: View {
                 liveStartTime: sessionStartTime,
                 onStartSession: startSession
             )
+            .navigationSplitViewColumnWidth(min: 300, ideal: 300, max: 420)
         } detail: {
             // Detail panel
             if isRunning {
@@ -47,6 +51,7 @@ struct ContentView: View {
                     transcriptionEngine: transcriptionEngine,
                     settings: settings,
                     liveTitle: $liveSessionTitle,
+                    sessionStartTime: sessionStartTime,
                     micAudioLevel: micAudioLevel,
                     systemAudioLevel: systemAudioLevel,
                     sessionID: liveSessionID,
@@ -71,6 +76,18 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 700, minHeight: 400)
+        .overlay {
+            if showsCollapsedSidebarNewNoteButton {
+                GeometryReader { proxy in
+                    collapsedSidebarNewNoteButton
+                        .padding(.top, collapsedSidebarNewNoteInset)
+                        .padding(.trailing, collapsedSidebarNewNoteInset)
+                        .offset(y: -proxy.safeAreaInsets.top)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .zIndex(2)
+                }
+            }
+        }
         .overlay {
             if showOnboarding {
                 OnboardingView(isPresented: $showOnboarding)
@@ -150,6 +167,34 @@ struct ContentView: View {
         transcriptionEngine?.isRunning ?? false
     }
 
+    private var showsCollapsedSidebarNewNoteButton: Bool {
+        !isRunning && columnVisibility == .detailOnly
+    }
+
+    private var collapsedSidebarNewNoteButton: some View {
+        Button {
+            startSession()
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("New Note")
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .padding(.horizontal, 13)
+            .padding(.vertical, 7)
+            .background(Color.warmCardBg)
+            .foregroundStyle(Color.warmTextPrimary)
+            .overlay {
+                Capsule()
+                    .stroke(Color.warmBorder, lineWidth: 1)
+            }
+            .clipShape(Capsule())
+            .shadow(color: .black.opacity(0.04), radius: 6, y: 2)
+        }
+        .buttonStyle(.plain)
+    }
+
     // MARK: - Actions
 
     private func startSession() {
@@ -162,8 +207,7 @@ struct ContentView: View {
             await sessionStore.startSession()
             if let url = await sessionStore.currentSessionURL {
                 liveSessionID = url.deletingPathExtension().lastPathComponent
-                let sessionsDirectory = await sessionStore.sessionsDirectoryURL
-                sessionAudioRecorder.start(sessionID: liveSessionID ?? "", in: sessionsDirectory)
+                sessionAudioRecorder.start(sessionID: liveSessionID ?? "", in: url.deletingLastPathComponent())
             }
             await transcriptLogger.startSession()
             await transcriptionEngine?.start(
@@ -226,7 +270,6 @@ struct ContentView: View {
                         sessionTitle: sessionTitleForFinalization,
                         apiKey: openAIAPIKey,
                         library: sessionLibrary,
-                        sessionStore: sessionStore,
                         transcriptLogger: transcriptLogger
                     )
                 }.value

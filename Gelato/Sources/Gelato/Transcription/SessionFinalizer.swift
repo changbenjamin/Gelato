@@ -44,8 +44,7 @@ enum SessionFinalizer {
         sessionTitle: String,
         apiKey: String,
         library: SessionLibrary,
-        sessionStore: SessionStore,
-        transcriptLogger: TranscriptLogger
+        transcriptLogger: TranscriptLogger? = nil
     ) async -> DiarizedTranscriptResult {
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return .init(didFinalize: false, errorMessage: nil)
@@ -105,11 +104,8 @@ enum SessionFinalizer {
                 return .init(didFinalize: false, errorMessage: nil)
             }
 
-            let records = utterances.map {
-                SessionRecord(speaker: $0.speaker, text: $0.text, timestamp: $0.timestamp)
-            }
-            await sessionStore.replaceRecords(records)
-            await transcriptLogger.replaceTranscript(with: utterances)
+            await library.replaceTranscript(for: sessionID, utterances: utterances)
+            await transcriptLogger?.replaceTranscript(with: utterances)
 
             let duration = utterances.last?.timestamp.timeIntervalSince(utterances.first?.timestamp ?? Date())
             await library.createMetadata(
@@ -142,7 +138,7 @@ enum SessionFinalizer {
         }
 
         let transcript = formattedTranscript(from: utterances)
-        let userNotes = await library.loadNotes(for: sessionID)
+        let userNotes = await library.userNotes(for: sessionID)
         let service = OpenAINotesService()
 
         do {

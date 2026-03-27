@@ -19,11 +19,15 @@ actor SessionStore {
     func startSession() {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-        let filename = "session_\(formatter.string(from: Date())).jsonl"
-        currentFile = sessionsDirectory.appendingPathComponent(filename)
+        let sessionID = "session_\(formatter.string(from: Date()))"
+        let sessionDirectory = SessionPaths.sessionDirectory(in: sessionsDirectory, sessionID: sessionID)
+        let transcriptURL = SessionPaths.transcriptURL(in: sessionsDirectory, sessionID: sessionID)
 
-        FileManager.default.createFile(atPath: currentFile!.path, contents: nil)
-        fileHandle = try? FileHandle(forWritingTo: currentFile!)
+        try? FileManager.default.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
+        currentFile = transcriptURL
+
+        FileManager.default.createFile(atPath: transcriptURL.path, contents: nil)
+        fileHandle = try? FileHandle(forWritingTo: transcriptURL)
     }
 
     func appendRecord(_ record: SessionRecord) {

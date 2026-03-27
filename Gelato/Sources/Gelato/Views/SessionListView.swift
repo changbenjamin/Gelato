@@ -101,7 +101,7 @@ struct SessionListView: View {
                 .fill(Color.warmBorder.opacity(0.8))
                 .frame(width: 1)
         }
-        .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 380)
+        .navigationSplitViewColumnWidth(min: 300, ideal: 300, max: 380)
     }
 
     // MARK: - Components

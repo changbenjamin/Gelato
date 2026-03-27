@@ -19,6 +19,7 @@ final class SystemAudioCapture: @unchecked Sendable {
     private var ioProcID: AudioDeviceIOProcID?
     private var tapFormat: AVAudioFormat?
     private var accumulator: PCMChunkAccumulator?
+    private var sampleRateResolver: SystemTapSampleRateResolver?
     private var deliveredChunkCount = 0
 
     var audioLevel: Float { _audioLevel.value }
@@ -84,12 +85,12 @@ final class SystemAudioCapture: @unchecked Sendable {
             return chunk
         }
 
-        if let pendingChunk {
-            deliveryQueue.sync {
-                deliver(chunk: pendingChunk, format: captureState.format)
+        deliveryQueue.sync {
+            if let pendingChunk {
+                handleDeliveredChunk(pendingChunk, fallbackFormat: captureState.format)
             }
+            flushBufferedChunks(fallbackFormat: captureState.format)
         }
-        deliveryQueue.sync {}
 
         if let aggregateDevice = captureState.aggregateDevice,
            let ioProcID = captureState.ioProcID {
@@ -123,6 +124,7 @@ final class SystemAudioCapture: @unchecked Sendable {
             accumulator = nil
             deliveredChunkCount = 0
         }
+        sampleRateResolver = nil
 
         let continuation = continuationLock.withLock { () -> AsyncStream<CapturedAudioBuffer>.Continuation? in
             let current = self.continuation
@@ -163,6 +165,15 @@ final class SystemAudioCapture: @unchecked Sendable {
 
         let tapUID = try processTap.uid
         var tapStreamDescription = try processTap.format
+        if let nominalSampleRate = Self.nominalSampleRate(for: outputDevice.id),
+           nominalSampleRate > 0,
+           abs(tapStreamDescription.mSampleRate - nominalSampleRate) > 1 {
+            diagLog(
+                "[SYS-TAP-RATE] overriding tap sample rate " +
+                "from \(tapStreamDescription.mSampleRate) to nominal \(nominalSampleRate)"
+            )
+            tapStreamDescription.mSampleRate = nominalSampleRate
+        }
         guard let tapFormat = AVAudioFormat(streamDescription: &tapStreamDescription) else {
             try? system.destroyProcessTap(processTap)
             throw CaptureError.invalidTapFormat
@@ -188,6 +199,7 @@ final class SystemAudioCapture: @unchecked Sendable {
         }
 
         let accumulator = try PCMChunkAccumulator(format: tapFormat, targetFrameCount: 4096)
+        sampleRateResolver = SystemTapSampleRateResolver(reportedFormat: tapFormat)
         var ioProcID: AudioDeviceIOProcID?
         let createStatus = AudioDeviceCreateIOProcIDWithBlock(
             &ioProcID,
@@ -241,8 +253,30 @@ final class SystemAudioCapture: @unchecked Sendable {
 
         deliveryQueue.async { [weak self] in
             guard let self else { return }
-            let format = self.stateLock.withLock { self.tapFormat }
-            self.deliver(chunk: pendingChunk, format: format)
+            let fallbackFormat = self.stateLock.withLock { self.tapFormat }
+            self.handleDeliveredChunk(pendingChunk, fallbackFormat: fallbackFormat)
+        }
+    }
+
+    private func handleDeliveredChunk(_ chunk: PendingPCMChunk, fallbackFormat: AVAudioFormat?) {
+        guard let resolver = sampleRateResolver else {
+            deliver(chunk: chunk, format: fallbackFormat)
+            return
+        }
+
+        let resolved = resolver.append(chunk)
+        for deliverableChunk in resolved.chunks {
+            deliver(chunk: deliverableChunk, format: resolved.format ?? fallbackFormat)
+        }
+    }
+
+    private func flushBufferedChunks(fallbackFormat: AVAudioFormat?) {
+        guard let resolver = sampleRateResolver else { return }
+        let resolved = resolver.drain(fallbackFormat: fallbackFormat)
+        sampleRateResolver = nil
+
+        for deliverableChunk in resolved.chunks {
+            deliver(chunk: deliverableChunk, format: resolved.format)
         }
     }
 
@@ -298,6 +332,24 @@ final class SystemAudioCapture: @unchecked Sendable {
             return UInt(index)
         }
         throw CaptureError.noOutputStream
+    }
+
+    private static func nominalSampleRate(for deviceID: AudioDeviceID) -> Double? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var sampleRate: Double = 0
+        var size = UInt32(MemoryLayout<Double>.size)
+        let status = AudioObjectGetPropertyData(
+            deviceID,
+            &address,
+            0, nil,
+            &size,
+            &sampleRate
+        )
+        return status == noErr ? sampleRate : nil
     }
 
     private static func normalizedRMS(from buffer: AVAudioPCMBuffer) -> Float {
@@ -402,6 +454,141 @@ final class SystemAudioCapture: @unchecked Sendable {
             }
         }
     }
+}
+
+private final class SystemTapSampleRateResolver {
+    private static let minimumObservedRates = 3
+    private static let maximumBufferedChunks = 6
+    private static let correctionThresholdRatio = 0.12
+    private static let canonicalRates: [Double] = [
+        8_000,
+        12_000,
+        16_000,
+        22_050,
+        24_000,
+        32_000,
+        44_100,
+        48_000
+    ]
+
+    private let reportedFormat: AVAudioFormat
+    private var previousChunk: PendingPCMChunk?
+    private var observedRates: [Double] = []
+    private var bufferedChunks: [PendingPCMChunk] = []
+    private var resolvedFormat: AVAudioFormat?
+
+    init(reportedFormat: AVAudioFormat) {
+        self.reportedFormat = reportedFormat
+    }
+
+    func append(_ chunk: PendingPCMChunk) -> ResolvedDelivery {
+        if let resolvedFormat {
+            return ResolvedDelivery(format: resolvedFormat, chunks: [chunk])
+        }
+
+        if let previousChunk {
+            let delta = chunk.capturedAt.timeIntervalSince(previousChunk.capturedAt)
+            if delta > 0 {
+                observedRates.append(Double(previousChunk.frameCount) / delta)
+            }
+        }
+        previousChunk = chunk
+        bufferedChunks.append(chunk)
+
+        let shouldForceResolution = bufferedChunks.count >= Self.maximumBufferedChunks
+        guard let format = resolveFormat(force: shouldForceResolution) else {
+            return ResolvedDelivery(format: nil, chunks: [])
+        }
+
+        let chunks = bufferedChunks
+        bufferedChunks = []
+        return ResolvedDelivery(format: format, chunks: chunks)
+    }
+
+    func drain(fallbackFormat: AVAudioFormat?) -> ResolvedDelivery {
+        let format = resolveFormat(force: true) ?? fallbackFormat
+        let chunks = bufferedChunks
+        bufferedChunks = []
+        previousChunk = nil
+        observedRates = []
+        return ResolvedDelivery(format: format, chunks: chunks)
+    }
+
+    private func resolveFormat(force: Bool) -> AVAudioFormat? {
+        if let resolvedFormat {
+            return resolvedFormat
+        }
+
+        guard force || observedRates.count >= Self.minimumObservedRates else {
+            return nil
+        }
+
+        guard let measuredRate = measuredRate() else {
+            resolvedFormat = reportedFormat
+            diagLog("[SYS-TAP-RATE-DETECTED] keeping reported rate \(reportedFormat.sampleRate); measured cadence unavailable")
+            return resolvedFormat
+        }
+
+        let reportedRate = reportedFormat.sampleRate
+        let shouldCorrect = abs(measuredRate - reportedRate) / max(reportedRate, 1) >= Self.correctionThresholdRatio
+        let chosenRate = shouldCorrect ? measuredRate : reportedRate
+
+        if shouldCorrect, let correctedFormat = Self.makeFormat(from: reportedFormat, sampleRate: chosenRate) {
+            resolvedFormat = correctedFormat
+            diagLog(
+                "[SYS-TAP-RATE-DETECTED] corrected reported rate \(reportedRate) -> \(chosenRate)"
+            )
+        } else {
+            resolvedFormat = reportedFormat
+            diagLog(
+                "[SYS-TAP-RATE-DETECTED] keeping reported rate \(reportedRate) " +
+                "(measured cadence \(measuredRate))"
+            )
+        }
+
+        return resolvedFormat
+    }
+
+    private func measuredRate() -> Double? {
+        let plausibleRates = observedRates.filter { $0.isFinite && $0 >= 4_000 && $0 <= 192_000 }
+        guard !plausibleRates.isEmpty else { return nil }
+
+        let medianRate = Self.median(of: plausibleRates)
+        guard let snappedRate = Self.snapToCanonicalRate(medianRate) else { return nil }
+        return snappedRate
+    }
+
+    private static func median(of values: [Double]) -> Double {
+        let sorted = values.sorted()
+        let middle = sorted.count / 2
+
+        if sorted.count.isMultiple(of: 2) {
+            return (sorted[middle - 1] + sorted[middle]) / 2
+        }
+
+        return sorted[middle]
+    }
+
+    private static func snapToCanonicalRate(_ measuredRate: Double) -> Double? {
+        guard let nearestRate = canonicalRates.min(by: { abs($0 - measuredRate) < abs($1 - measuredRate) }) else {
+            return nil
+        }
+
+        let tolerance = nearestRate * 0.05
+        guard abs(nearestRate - measuredRate) <= tolerance else { return nil }
+        return nearestRate
+    }
+
+    private static func makeFormat(from format: AVAudioFormat, sampleRate: Double) -> AVAudioFormat? {
+        var streamDescription = format.streamDescription.pointee
+        streamDescription.mSampleRate = sampleRate
+        return AVAudioFormat(streamDescription: &streamDescription)
+    }
+}
+
+private struct ResolvedDelivery {
+    let format: AVAudioFormat?
+    let chunks: [PendingPCMChunk]
 }
 
 private struct PendingPCMChunk: Sendable {
