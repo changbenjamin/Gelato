@@ -153,10 +153,17 @@ final class MicCapture: @unchecked Sendable {
         return stream
     }
 
+    func finishStream() {
+        continuationLock.withLock {
+            continuation?.finish()
+            continuation = nil
+        }
+        callbackLock.withLock { onBuffer = nil }
+    }
+
     func stop() {
         diagLog("[MIC-STOP] begin")
-        continuationLock.withLock { continuation?.finish(); continuation = nil }
-        callbackLock.withLock { onBuffer = nil }
+        finishStream()
         if hasTapInstalled {
             engine.inputNode.removeTap(onBus: 0)
             hasTapInstalled = false

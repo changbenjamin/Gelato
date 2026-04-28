@@ -48,7 +48,7 @@ struct SettingsView: View {
                 Text("Current app config path: ~/Library/Application Support/Gelato/.env")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.secondary)
-                Text("Set `OPENAI_API_KEY` to enable diarized transcript replacement and automatic notes.")
+                Text("Set `OPENAI_API_KEY` to enable transcript cleanup and automatic notes.")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.secondary)
                 Text("After editing `.env`, relaunch Gelato to pick up changes.")

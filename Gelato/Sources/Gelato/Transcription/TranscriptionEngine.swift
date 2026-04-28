@@ -59,6 +59,12 @@ final class TranscriptionEngine {
     /// so that rapid-fire events (e.g. AirPods disconnect triggers both input + output changes)
     /// collapse into a single restart.
     private var micRestartTask: Task<Void, Never>?
+    /// Queued system-capture restart task. Output swaps can fire multiple
+    /// notifications back-to-back; only one restart loop may own the tap.
+    private var systemRestartTask: Task<Void, Never>?
+    /// Remembers that another output-change notification arrived while a
+    /// restart was pending or in flight.
+    private var pendingSystemRestart = false
 
     init(transcriptStore: TranscriptStore) {
         self.transcriptStore = transcriptStore
@@ -209,6 +215,28 @@ final class TranscriptionEngine {
         }
     }
 
+    /// Queue a system restart. This follows OpenOats' stream-first shutdown:
+    /// finish the old stream, wait for its transcriber to exit, then tear down
+    /// the CoreAudio tap before creating a new one.
+    private func restartSystemCapture() {
+        guard isRunning else { return }
+        pendingSystemRestart = true
+        guard systemRestartTask == nil else {
+            diagLog("[ENGINE-SYS-SWAP] restart already running; queued another pass")
+            return
+        }
+
+        systemRestartTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.systemRestartTask = nil }
+
+            while self.isRunning, self.pendingSystemRestart, !Task.isCancelled {
+                self.pendingSystemRestart = false
+                await self.performSystemCaptureRestart()
+            }
+        }
+    }
+
     /// Restart only the mic capture with a new device, keeping system audio and models intact.
     /// Pass the raw setting value (0 = automatic selection, or a specific AudioDeviceID).
     func restartMic(inputDeviceID: AudioDeviceID, force: Bool = false) {
@@ -226,6 +254,7 @@ final class TranscriptionEngine {
         diagLog("[ENGINE-MIC-SWAP] switching mic from \(currentMicDeviceID) to \(targetMicID)")
 
         // Tear down old mic
+        micCapture.finishStream()
         micTask?.cancel()
         micTask = nil
         micCapture.stop()
@@ -306,8 +335,8 @@ final class TranscriptionEngine {
             guard let self else { return }
             Task { @MainActor in
                 guard self.isRunning else { return }
-                diagLog("[ENGINE-DEVICE-CHANGE] default output device changed, restarting system + scheduling mic restart")
-                await self.restartSystemCapture()
+                diagLog("[ENGINE-DEVICE-CHANGE] default output device changed, scheduling system + mic restart")
+                self.restartSystemCapture()
                 self.scheduleMicRestart()
             }
         }
@@ -353,17 +382,21 @@ final class TranscriptionEngine {
         defaultOutputDeviceListenerBlock = nil
     }
 
-    private func restartSystemCapture() async {
+    private func performSystemCaptureRestart() async {
         guard isRunning, let asrManager, let vadManager else { return }
 
         diagLog("[ENGINE-SYS-SWAP] restarting system capture for output device change")
-        sysTask?.cancel()
+        systemCapture.finishStream()
+        await sysTask?.value
+        guard isRunning, !Task.isCancelled else { return }
         sysTask = nil
 
         let audioRecorder = self.audioRecorder
-        await Task.detached(priority: .userInitiated) {
-            await self.systemCapture.stop()
-        }.value
+        await systemCapture.stop()
+
+        // Reset the audio recorder's system format so it doesn't try to convert
+        // new-device audio to the old-device format using a wrong sample rate.
+        audioRecorder?.resetSystemFormat()
 
         do {
             let sysStreams = try await systemCapture.bufferStream(
@@ -428,6 +461,9 @@ final class TranscriptionEngine {
         removeDefaultOutputDeviceListener()
         micRestartTask?.cancel()
         micRestartTask = nil
+        systemRestartTask?.cancel()
+        systemRestartTask = nil
+        pendingSystemRestart = false
         let micTask = self.micTask
         let sysTask = self.sysTask
         self.micKeepAliveTask?.cancel()
@@ -437,9 +473,14 @@ final class TranscriptionEngine {
         isRunning = false
         assetStatus = "Ready"
 
-        micCapture.stop()
+        micCapture.finishStream()
+        systemCapture.finishStream()
         micTask?.cancel()
         sysTask?.cancel()
+        await micTask?.value
+        await sysTask?.value
+
+        micCapture.stop()
 
         let systemCapture = self.systemCapture
         let recorder = audioRecorder

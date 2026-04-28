@@ -64,7 +64,6 @@ struct SessionDetailView: View {
     @State private var isLoading = true
     @State private var isRegenerating = false
     @State private var regeneratingStatus = "Processing session..."
-    @State private var hasSessionAudio = false
     @State private var regenerationErrorMessage: String?
     @State private var selectedTab: DetailTab = .notes
     @StateObject private var meetingQAStore = MeetingQAStore()
@@ -356,7 +355,7 @@ struct SessionDetailView: View {
 
     private var canRegenerateCurrentSession: Bool {
         !isRegenerating &&
-            hasSessionAudio &&
+            !utterances.isEmpty &&
             !openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -364,10 +363,10 @@ struct SessionDetailView: View {
         if openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return "Add an OpenAI API key to regenerate the transcript and notes."
         }
-        if !hasSessionAudio {
-            return "This session doesn’t have saved audio to regenerate from."
+        if utterances.isEmpty {
+            return "This session doesn’t have a Parakeet transcript to clean."
         }
-        return "Regenerate the transcript and notes from the saved session audio."
+        return "Clean the saved Parakeet transcript and regenerate notes."
     }
 
     private func copyCurrentTab() {
@@ -400,18 +399,11 @@ struct SessionDetailView: View {
         let currentTitle = editableTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         let sessionTitle = currentTitle.isEmpty ? session.metadata.title : currentTitle
         regenerationErrorMessage = nil
-        regeneratingStatus = "Creating combined audio..."
+        regeneratingStatus = "Processing transcript..."
         isRegenerating = true
 
         Task {
-            await SessionFinalizer.generateCombinedAudioIfPossible(
-                sessionID: session.id,
-                library: library
-            )
-
-            regeneratingStatus = "Processing audio with OpenAI gpt-4o-transcribe-diarize..."
-
-            let transcriptResult = await SessionFinalizer.finalizeDiarizedTranscript(
+            let transcriptResult = await SessionFinalizer.finalizeCleanedTranscript(
                 sessionID: session.id,
                 sessionURL: session.jsonlURL,
                 sessionTitle: sessionTitle,
@@ -419,7 +411,7 @@ struct SessionDetailView: View {
                 library: library
             )
 
-            guard transcriptResult.didFinalize else {
+            guard transcriptResult.didClean else {
                 let message = transcriptResult.errorMessage
                     ?? "Gelato couldn’t regenerate a transcript for this session."
                 regenerationErrorMessage = message
@@ -454,13 +446,11 @@ struct SessionDetailView: View {
     private func reloadSessionContent() async {
         let loadedTranscript = await library.loadTranscript(for: session.id)
         let loadedNotes = await library.loadNotes(for: session.id)
-        let hasAudioFiles = await library.audioFiles(for: session.id) != nil
         let refreshedTitle = await refreshedSessionTitle()
 
         editableTitle = refreshedTitle
         notesMarkdown = loadedNotes
         utterances = loadedTranscript
-        hasSessionAudio = hasAudioFiles
 
         await meetingQAStore.prepare(
             sessionID: session.id,

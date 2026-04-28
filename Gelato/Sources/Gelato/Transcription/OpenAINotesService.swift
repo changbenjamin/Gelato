@@ -8,7 +8,6 @@ private struct ChatCompletionRequest: Encodable {
 
     let model: String
     let messages: [Message]
-    let temperature: Double
 }
 
 private struct ChatCompletionResponse: Decodable {
@@ -44,6 +43,15 @@ enum OpenAINotesError: LocalizedError {
 }
 
 struct OpenAINotesService {
+    private static let model = "gpt-5-mini-2025-08-07"
+    private static let requestTimeout: TimeInterval = 300
+    private static let defaultSession: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = requestTimeout
+        configuration.timeoutIntervalForResource = requestTimeout
+        return URLSession(configuration: configuration)
+    }()
+
     private let session: URLSession
 
     struct GeneratedNotes: Sendable {
@@ -51,8 +59,8 @@ struct OpenAINotesService {
         let notes: String
     }
 
-    init(session: URLSession = .shared) {
-        self.session = session
+    init(session: URLSession? = nil) {
+        self.session = session ?? Self.defaultSession
     }
 
     func generateNotes(
@@ -80,11 +88,13 @@ struct OpenAINotesService {
 
         5. Write for someone who wasn't in the room. The notes should allow a colleague who missed the meeting to understand what happened, what was decided, what's still open, and what they need to do — without needing to ask follow-up questions.
 
-        6. Treat speaker labels as roles, not names. The transcript may use labels like "You" and "Them" to distinguish the user from the other participant. These are not literal names and should never be written as quoted character names. If no real name is known, refer to the speakers naturally as "you" and "they," or "the other caller/participant" where needed for clarity.
+        6. Treat speaker labels as roles, not names. The transcript may use labels like "You" and "Them" to distinguish the user from the other participant. These are not literal names and should never be written as quoted character names. If no real name is known, refer to the speakers naturally as "you" and "they," or "the other caller/participant" where needed for clarity. Never write phrases like "You's statement" or "Them's response"; write "your statement" or "the other participant's response."
 
         ## Output structure
 
         Use the following structure. Omit any section that has no relevant content — do not include empty sections or placeholder text.
+
+        Start the notes directly with this heading. Do not add a wrapper heading like "## AI-Generated Notes".
 
         ### Executive Summary
         2–4 sentences. What was this meeting about, what were the most important outcomes, and is anything time-sensitive? This should be useful on its own for someone skimming.
@@ -111,6 +121,8 @@ struct OpenAINotesService {
         - Do not pad with filler language. Every sentence should carry information.
         - If the audio quality was poor or a section of transcript is garbled, note it: "[inaudible/unclear ~2 min mark]" rather than guessing.
         - Refer to participants by their first name after the first full-name mention, or matching how they were addressed in the meeting. If no name is known, use natural role language like "you" and "they" instead of invented names.
+        - Headings must be clean, human-readable topic names. Do not use parenthetical keyword dumps in headings, such as "(socialism / 1979 / Soviet Union / California)". Avoid parentheses in headings unless they are part of an actual proper noun or title.
+        - Do not make headings possessive from transcript role labels. Use "Your Political Statement" instead of "You's Political Statement"; use "Other Participant's Point" instead of "Them's Point".
 
         Also produce a short descriptive title, 5 to 6 words maximum.
         Do not include any date, day of week, or time in the title.
@@ -137,12 +149,11 @@ struct OpenAINotesService {
         """
 
         let body = ChatCompletionRequest(
-            model: "gpt-5.4-nano",
+            model: Self.model,
             messages: [
                 .init(role: "system", content: systemPrompt),
                 .init(role: "user", content: userPrompt)
-            ],
-            temperature: 1.0
+            ]
         )
 
         var request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
@@ -201,4 +212,5 @@ struct OpenAINotesService {
         }
         return String(text[startRange.upperBound..<endRange.lowerBound])
     }
+
 }

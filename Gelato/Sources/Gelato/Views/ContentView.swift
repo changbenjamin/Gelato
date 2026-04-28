@@ -224,6 +224,7 @@ struct ContentView: View {
         let wordCount = transcriptStore.utterances.reduce(0) { $0 + $1.text.split(separator: " ").count }
         let sessionID = liveSessionID
         var sessionTitle = liveSessionTitle
+        let parakeetSourceUtterances = transcriptStore.utterances.chronologicallySorted
         let transcriptionMode = settings.transcriptionMode
         let openAIAPIKey = settings.openAIAPIKey
         let sessionLibrary = self.sessionLibrary
@@ -246,7 +247,7 @@ struct ContentView: View {
 
             // Get session URL before ending (which clears it)
             let sessionURL = await sessionStore.currentSessionURL
-            var didFinalizeAdvanced = false
+            var didCleanTranscript = false
 
             if let sessionID {
                 processingStatus = "Creating combined audio..."
@@ -258,22 +259,23 @@ struct ContentView: View {
                 }.value
             }
 
-            if transcriptionMode == .openAIDiarize,
+            if transcriptionMode == .openAICleanup,
                let sessionID,
                let sessionURL {
-                processingStatus = "Processing audio with OpenAI gpt-4o-transcribe-diarize..."
+                processingStatus = "Processing transcript..."
                 let sessionTitleForFinalization = sessionTitle
                 let result = await Task.detached(priority: .userInitiated) {
-                    await SessionFinalizer.finalizeDiarizedTranscript(
+                    await SessionFinalizer.finalizeCleanedTranscript(
                         sessionID: sessionID,
                         sessionURL: sessionURL,
                         sessionTitle: sessionTitleForFinalization,
                         apiKey: openAIAPIKey,
                         library: sessionLibrary,
-                        transcriptLogger: transcriptLogger
+                        transcriptLogger: transcriptLogger,
+                        parakeetSourceUtterances: parakeetSourceUtterances
                     )
                 }.value
-                didFinalizeAdvanced = result.didFinalize
+                didCleanTranscript = result.didClean
                 if let errorMessage = result.errorMessage {
                     finalizationMessage = errorMessage
                 }
@@ -303,7 +305,7 @@ struct ContentView: View {
             await transcriptLogger.endSession()
 
             // Create metadata sidecar
-            if let url = sessionURL, !didFinalizeAdvanced {
+            if let url = sessionURL, !didCleanTranscript {
                 await sessionLibrary.createMetadata(
                     for: url,
                     title: sessionTitle,
@@ -324,7 +326,7 @@ struct ContentView: View {
             }
             isProcessingSession = false
             processingStatus = "Processing session..."
-            if didFinalizeAdvanced || transcriptionMode != .openAIDiarize {
+            if didCleanTranscript || transcriptionMode != .openAICleanup {
                 finalizationMessage = nil
             }
         }
@@ -363,7 +365,7 @@ struct ContentView: View {
         guard !utterances.isEmpty else { return nil }
 
         let transcript = formattedTranscript(from: utterances)
-        let userNotes = await sessionLibrary.loadNotes(for: sessionID)
+        let userNotes = await sessionLibrary.userNotes(for: sessionID)
         let service = OpenAINotesService()
 
         do {
@@ -404,230 +406,6 @@ struct ContentView: View {
         } catch {
             diagLog("[AUDIO-FAIL] \(sessionID): \(error.localizedDescription)")
         }
-    }
-
-    private func finalizeDiarizedTranscript(sessionID: String, sessionURL: URL, sessionTitle: String) async -> Bool {
-        guard let audioFiles = await sessionLibrary.audioFiles(for: sessionID) else {
-            return false
-        }
-
-        let audioTiming = await sessionLibrary.audioTiming(for: sessionID)
-        let liveUtterances = await sessionLibrary.loadTranscript(for: sessionID)
-        let combinedStart = combinedAudioStartDate(audioTiming: audioTiming, sessionID: sessionID)
-        let knownSpeakers = await OpenAISpeakerReferenceBuilder.buildReferences(
-            audioFiles: audioFiles,
-            audioTiming: audioTiming,
-            liveUtterances: liveUtterances
-        )
-        let service = OpenAIDiarizedTranscriptionService()
-
-        do {
-            let uploadURL = await diarizationUploadURL(
-                sessionID: sessionID,
-                audioFiles: audioFiles,
-                audioTiming: audioTiming
-            )
-            guard let uploadURL else { return false }
-
-            diagLog("[OPENAI] uploading \(uploadURL.lastPathComponent) for \(sessionID)")
-            let response: OpenAIDiarizedTranscriptResponse
-            if uploadURL.path.contains("GelatoOpenAIUploads") {
-                response = try await { () async throws -> OpenAIDiarizedTranscriptResponse in
-                    defer { try? FileManager.default.removeItem(at: uploadURL) }
-                    return try await service.transcribe(
-                        audioURL: uploadURL,
-                        apiKey: settings.openAIAPIKey,
-                        knownSpeakers: knownSpeakers
-                    )
-                }()
-            } else {
-                response = try await service.transcribe(
-                    audioURL: uploadURL,
-                    apiKey: settings.openAIAPIKey,
-                    knownSpeakers: knownSpeakers
-                )
-            }
-
-            let speakerSummary = Set((response.segments ?? []).map(\.speaker)).sorted().joined(separator: ",")
-            diagLog("[OPENAI] \(sessionID) textLength=\(response.text.count) segments=\(response.segments?.count ?? 0) speakers=[\(speakerSummary)]")
-            let utterances = diarizedUtterances(
-                from: response,
-                sessionStart: combinedStart,
-                liveUtterances: liveUtterances
-            )
-            guard !utterances.isEmpty else { return false }
-
-            let records = utterances.map {
-                SessionRecord(speaker: $0.speaker, text: $0.text, timestamp: $0.timestamp)
-            }
-            await sessionStore.replaceRecords(records)
-            await transcriptLogger.replaceTranscript(with: utterances)
-
-            let duration = utterances.last?.timestamp.timeIntervalSince(utterances.first?.timestamp ?? Date())
-            await sessionLibrary.createMetadata(
-                for: sessionURL,
-                title: sessionTitle,
-                utteranceCount: utterances.count,
-                wordCount: utterances.reduce(0) { $0 + $1.text.split(separator: " ").count },
-                duration: duration
-            )
-            return true
-        } catch {
-            diagLog("[OPENAI-FAIL] \(sessionID): \(error.localizedDescription)")
-            finalizationMessage = error.localizedDescription
-            return false
-        }
-    }
-
-    private func diarizationUploadURL(
-        sessionID: String,
-        audioFiles: SessionAudioFiles,
-        audioTiming: SessionAudioTiming?
-    ) async -> URL? {
-        if let combinedURL = audioFiles.combinedURL {
-            return combinedURL
-        }
-
-        do {
-            let uploadURL = try await OpenAIDiarizationInputBuilder.buildUploadFile(
-                audioFiles: audioFiles,
-                audioTiming: audioTiming,
-                sessionID: sessionID
-            )
-
-            if let uploadURL {
-                diagLog("[OPENAI-UPLOAD] built fallback upload file for \(sessionID): \(uploadURL.lastPathComponent)")
-            } else {
-                diagLog("[OPENAI-UPLOAD] no upload file available for \(sessionID)")
-            }
-
-            return uploadURL
-        } catch {
-            diagLog("[OPENAI-UPLOAD-FAIL] \(sessionID): \(error.localizedDescription)")
-            return nil
-        }
-    }
-
-    private func diarizedUtterances(
-        from response: OpenAIDiarizedTranscriptResponse,
-        sessionStart: Date,
-        liveUtterances: [Utterance]
-    ) -> [Utterance] {
-        guard let segments = response.segments, !segments.isEmpty else { return [] }
-
-        let inferredSpeakers = inferredSpeakerMap(
-            for: segments,
-            sessionStart: sessionStart,
-            liveUtterances: liveUtterances
-        )
-
-        return segments.compactMap { segment in
-            let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { return nil }
-
-            let speakerKey = normalizedSpeakerKey(segment.speaker)
-            let speaker = explicitSpeaker(for: speakerKey)
-                ?? inferredSpeakers[speakerKey]
-                ?? nearestLiveSpeaker(
-                    to: sessionStart.addingTimeInterval((segment.start + segment.end) / 2),
-                    liveUtterances: liveUtterances
-                )
-                ?? .them
-
-            return Utterance(
-                text: text,
-                speaker: speaker,
-                timestamp: sessionStart.addingTimeInterval(max(0, segment.start))
-            )
-        }
-        .chronologicallySorted
-    }
-
-    private func inferredSpeakerMap(
-        for segments: [OpenAIDiarizedSegment],
-        sessionStart: Date,
-        liveUtterances: [Utterance]
-    ) -> [String: Speaker] {
-        let explicitSpeakers = Set(segments.compactMap { explicitSpeaker(for: normalizedSpeakerKey($0.speaker)) })
-        let genericLabels = Array(Set(segments.map { normalizedSpeakerKey($0.speaker) }.filter {
-            explicitSpeaker(for: $0) == nil
-        }))
-
-        guard !genericLabels.isEmpty else { return [:] }
-
-        var scores: [String: [Speaker: Int]] = [:]
-        for segment in segments {
-            let label = normalizedSpeakerKey(segment.speaker)
-            guard explicitSpeaker(for: label) == nil else { continue }
-            guard let liveSpeaker = nearestLiveSpeaker(
-                to: sessionStart.addingTimeInterval((segment.start + segment.end) / 2),
-                liveUtterances: liveUtterances
-            ) else {
-                continue
-            }
-            scores[label, default: [:]][liveSpeaker, default: 0] += 1
-        }
-
-        if genericLabels.count == 1,
-           let label = genericLabels.first {
-            if explicitSpeakers.count == 1, let explicitSpeaker = explicitSpeakers.first {
-                return [label: explicitSpeaker == .you ? .them : .you]
-            }
-
-            let labelScores = scores[label] ?? [:]
-            let youScore = labelScores[.you, default: 0]
-            let themScore = labelScores[.them, default: 0]
-            return [label: youScore >= themScore ? .you : .them]
-        }
-
-        let sortedLabels = genericLabels.sorted { lhs, rhs in
-            speakerScoreDelta(for: lhs, scores: scores) > speakerScoreDelta(for: rhs, scores: scores)
-        }
-
-        var mapping: [String: Speaker] = [:]
-        for (index, label) in sortedLabels.enumerated() {
-            mapping[label] = index == 0 ? .you : .them
-        }
-        return mapping
-    }
-
-    private func nearestLiveSpeaker(to timestamp: Date, liveUtterances: [Utterance]) -> Speaker? {
-        guard let nearest = liveUtterances.min(by: {
-            abs($0.timestamp.timeIntervalSince(timestamp)) < abs($1.timestamp.timeIntervalSince(timestamp))
-        }) else {
-            return nil
-        }
-
-        let distance = abs(nearest.timestamp.timeIntervalSince(timestamp))
-        return distance <= 4 ? nearest.speaker : nil
-    }
-
-    private func speakerScoreDelta(for label: String, scores: [String: [Speaker: Int]]) -> Int {
-        let labelScores = scores[label] ?? [:]
-        return labelScores[.you, default: 0] - labelScores[.them, default: 0]
-    }
-
-    private func explicitSpeaker(for normalizedSpeaker: String) -> Speaker? {
-        switch normalizedSpeaker {
-        case "you":
-            return .you
-        case "them":
-            return .them
-        default:
-            return nil
-        }
-    }
-
-    private func normalizedSpeakerKey(_ rawSpeaker: String) -> String {
-        rawSpeaker
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-    }
-
-    private func combinedAudioStartDate(audioTiming: SessionAudioTiming?, sessionID: String) -> Date {
-        [audioTiming?.micFirstBufferAt, audioTiming?.systemFirstBufferAt]
-            .compactMap { $0 }
-            .min() ?? (SessionMetadataIO.parseDate(from: sessionID) ?? Date())
     }
 
     private func formattedTranscript(from utterances: [Utterance]) -> String {

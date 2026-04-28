@@ -64,6 +64,15 @@ final class SessionAudioRecorder: @unchecked Sendable {
         }
     }
 
+    /// Reset the system writer's locked format so it re-locks to the next buffer's
+    /// format. Call this when the system audio capture restarts (e.g. output device change)
+    /// so the writer doesn't try to convert new-device audio into the old-device format.
+    func resetSystemFormat() {
+        lock.lock()
+        systemWriter?.resetTargetFormat()
+        lock.unlock()
+    }
+
     func appendSystemBuffer(_ capturedBuffer: CapturedAudioBuffer) {
         lock.lock()
         let writer = systemWriter
@@ -151,6 +160,19 @@ private final class PCMFileWriter: @unchecked Sendable {
 
     init(url: URL) {
         self.url = url
+    }
+
+    /// Clear the locked target format so the next buffer sets a fresh format.
+    /// The underlying file handle stays open — subsequent buffers at the new format
+    /// will be converted to the file's original format via AVAudioConverter.
+    func resetTargetFormat() {
+        lock.lock()
+        // Don't reset targetFormat if a file is already open — the file was created
+        // with the original format and we must convert to it. Instead, just reset
+        // the converter so it's rebuilt for the new incoming format.
+        converter = nil
+        converterInputFormat = nil
+        lock.unlock()
     }
 
     func prepareBufferForWriting(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {

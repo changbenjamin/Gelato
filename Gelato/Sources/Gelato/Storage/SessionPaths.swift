@@ -20,6 +20,11 @@ enum SessionPaths {
             .appendingPathComponent("\(sessionID).jsonl")
     }
 
+    static func originalTranscriptURL(in sessionsDirectory: URL, sessionID: String) -> URL {
+        sessionDirectory(in: sessionsDirectory, sessionID: sessionID)
+            .appendingPathComponent("\(sessionID).parakeet.jsonl")
+    }
+
     static func metadataURL(in sessionsDirectory: URL, sessionID: String) -> URL {
         SessionMetadataIO.metadataURL(for: transcriptURL(in: sessionsDirectory, sessionID: sessionID))
     }

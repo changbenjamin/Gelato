@@ -66,6 +66,7 @@ private struct UtteranceBubble: View {
             Text(utterance.text)
                 .font(.system(size: 13))
                 .foregroundStyle(Color.readingText)
+                .lineSpacing(4)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }

@@ -3,6 +3,7 @@ import Foundation
 /// Manages the catalog of all recorded sessions on disk.
 actor SessionLibrary {
     private static let generatedNotesHeading = "## AI-Generated Notes"
+    private static let generatedNotesStartHeading = "### Executive Summary"
     private let sessionsDirectory: URL
     private let decoder = SessionAudioTiming.makeJSONDecoder()
     private let sessionRecordEncoder: JSONEncoder = {
@@ -91,9 +92,16 @@ actor SessionLibrary {
         return Array(transcriptURLsBySessionID.values)
     }
 
-    /// Load the full transcript from a JSONL file.
     func loadTranscript(for sessionID: String) -> [Utterance] {
-        let jsonlURL = transcriptURL(for: sessionID)
+        loadTranscript(from: transcriptURL(for: sessionID))
+    }
+
+    func loadOriginalTranscript(for sessionID: String) -> [Utterance] {
+        loadTranscript(from: originalTranscriptURL(for: sessionID))
+    }
+
+    /// Load the full transcript from a JSONL file.
+    private func loadTranscript(from jsonlURL: URL) -> [Utterance] {
         guard let data = try? Data(contentsOf: jsonlURL) else { return [] }
         guard let content = String(data: data, encoding: .utf8) else { return [] }
 
@@ -178,10 +186,14 @@ actor SessionLibrary {
         let notesURL = notesURL(for: sessionID)
         let existing = loadNotes(for: sessionID)
         let userNotes = splitNotes(existing).userNotes
-        let generatedBlock = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let generatedBlock = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\(Self.generatedNotesHeading)\n\n", with: "")
+            .replacingOccurrences(of: Self.generatedNotesHeading, with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         let cleanedUserNotes = userNotes.trimmingCharacters(in: .whitespacesAndNewlines)
-        let sections = [cleanedUserNotes.isEmpty ? nil : cleanedUserNotes, generatedBlock.isEmpty ? nil : "\(Self.generatedNotesHeading)\n\n\(generatedBlock)"]
+        let sections = [cleanedUserNotes.isEmpty ? nil : cleanedUserNotes, generatedBlock.isEmpty ? nil : generatedBlock]
             .compactMap { $0 }
         let finalText = sections.joined(separator: "\n\n")
 
@@ -195,6 +207,16 @@ actor SessionLibrary {
 
     func replaceTranscript(for sessionID: String, utterances: [Utterance]) {
         let jsonlURL = transcriptURL(for: sessionID)
+        writeTranscript(utterances, to: jsonlURL, logLabel: "TRANSCRIPT-WRITE")
+    }
+
+    func saveOriginalTranscriptIfMissing(for sessionID: String, utterances: [Utterance]) {
+        let jsonlURL = originalTranscriptURL(for: sessionID)
+        guard !FileManager.default.fileExists(atPath: jsonlURL.path) else { return }
+        writeTranscript(utterances, to: jsonlURL, logLabel: "ORIGINAL-TRANSCRIPT-WRITE")
+    }
+
+    private func writeTranscript(_ utterances: [Utterance], to jsonlURL: URL, logLabel: String) {
         try? FileManager.default.createDirectory(at: jsonlURL.deletingLastPathComponent(), withIntermediateDirectories: true)
 
         let records = utterances.map {
@@ -208,7 +230,7 @@ actor SessionLibrary {
             }
             try data.write(to: jsonlURL, options: .atomic)
         } catch {
-            diagLog("[TRANSCRIPT-WRITE-FAIL] \(sessionID): \(error.localizedDescription)")
+            diagLog("[\(logLabel)-FAIL] \(jsonlURL.lastPathComponent): \(error.localizedDescription)")
         }
     }
 
@@ -308,6 +330,10 @@ actor SessionLibrary {
         SessionPaths.transcriptURL(in: sessionsDirectory, sessionID: sessionID)
     }
 
+    private func originalTranscriptURL(for sessionID: String) -> URL {
+        SessionPaths.originalTranscriptURL(in: sessionsDirectory, sessionID: sessionID)
+    }
+
     private func metadataURL(for sessionID: String) -> URL {
         SessionPaths.metadataURL(in: sessionsDirectory, sessionID: sessionID)
     }
@@ -321,12 +347,20 @@ actor SessionLibrary {
     }
 
     private func splitNotes(_ text: String) -> (userNotes: String, generatedNotes: String?) {
-        guard let headingRange = text.range(of: Self.generatedNotesHeading) else {
+        let headingRange = text.range(of: Self.generatedNotesHeading)
+            ?? text.range(of: Self.generatedNotesStartHeading)
+
+        guard let headingRange else {
             return (text.trimmingCharacters(in: .whitespacesAndNewlines), nil)
         }
 
         let userNotes = String(text[..<headingRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-        let generatedNotes = String(text[headingRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let generatedNotes: String
+        if text[headingRange].starts(with: Self.generatedNotesStartHeading) {
+            generatedNotes = String(text[headingRange.lowerBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            generatedNotes = String(text[headingRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         return (userNotes, generatedNotes.isEmpty ? nil : generatedNotes)
     }
 

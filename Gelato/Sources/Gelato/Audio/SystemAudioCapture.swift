@@ -20,6 +20,7 @@ final class SystemAudioCapture: @unchecked Sendable {
     private var tapFormat: AVAudioFormat?
     private var accumulator: PCMChunkAccumulator?
     private var sampleRateResolver: SystemTapSampleRateResolver?
+    private var captureGeneration = UUID()
     private var deliveredChunkCount = 0
 
     var audioLevel: Float { _audioLevel.value }
@@ -31,6 +32,9 @@ final class SystemAudioCapture: @unchecked Sendable {
     func bufferStream(
         onSystemBuffer: (@Sendable (CapturedAudioBuffer) -> Void)? = nil
     ) async throws -> CaptureStreams {
+        await stop()
+
+        let generation = UUID()
         callbackLock.withLock {
             self.onSystemBuffer = onSystemBuffer
         }
@@ -47,7 +51,7 @@ final class SystemAudioCapture: @unchecked Sendable {
         }
 
         do {
-            try startCapture()
+            try startCapture(generation: generation)
             return CaptureStreams(systemAudio: stream)
         } catch {
             continuationLock.withLock {
@@ -61,13 +65,26 @@ final class SystemAudioCapture: @unchecked Sendable {
         }
     }
 
+    func finishStream() {
+        continuationLock.withLock {
+            continuation?.finish()
+            continuation = nil
+        }
+        callbackLock.withLock {
+            onSystemBuffer = nil
+        }
+    }
+
     func stop() async {
+        finishStream()
+
         let captureState = stateLock.withLock { () -> CaptureState in
             CaptureState(
                 processTap: processTap,
                 aggregateDevice: aggregateDevice,
                 ioProcID: ioProcID,
-                format: tapFormat
+                format: tapFormat,
+                generation: captureGeneration
             )
         }
 
@@ -122,24 +139,14 @@ final class SystemAudioCapture: @unchecked Sendable {
             ioProcID = nil
             tapFormat = nil
             accumulator = nil
+            captureGeneration = UUID()
             deliveredChunkCount = 0
         }
         sampleRateResolver = nil
-
-        let continuation = continuationLock.withLock { () -> AsyncStream<CapturedAudioBuffer>.Continuation? in
-            let current = self.continuation
-            self.continuation = nil
-            return current
-        }
-        continuation?.finish()
-
-        callbackLock.withLock {
-            onSystemBuffer = nil
-        }
         _audioLevel.value = 0
     }
 
-    private func startCapture() throws {
+    private func startCapture(generation: UUID) throws {
         let system = AudioHardwareSystem.shared
 
         guard let outputDevice = try system.defaultOutputDevice else {
@@ -158,6 +165,9 @@ final class SystemAudioCapture: @unchecked Sendable {
         tapDescription.name = "Gelato System Audio"
         tapDescription.isPrivate = true
         tapDescription.muteBehavior = .unmuted
+        tapDescription.isMixdown = true
+        tapDescription.isMono = true
+        tapDescription.isExclusive = true
 
         guard let processTap = try system.makeProcessTap(description: tapDescription) else {
             throw CaptureError.tapCreationFailed
@@ -189,7 +199,10 @@ final class SystemAudioCapture: @unchecked Sendable {
             ],
             kAudioAggregateDeviceMainSubDeviceKey: outputUID,
             kAudioAggregateDeviceTapListKey: [
-                [kAudioSubTapUIDKey: tapUID]
+                [
+                    kAudioSubTapUIDKey: tapUID,
+                    kAudioSubTapDriftCompensationKey: true
+                ]
             ]
         ]
 
@@ -198,7 +211,11 @@ final class SystemAudioCapture: @unchecked Sendable {
             throw CaptureError.aggregateDeviceCreationFailed
         }
 
-        let accumulator = try PCMChunkAccumulator(format: tapFormat, targetFrameCount: 4096)
+        let accumulator = try PCMChunkAccumulator(
+            format: tapFormat,
+            targetFrameCount: 4096,
+            generation: generation
+        )
         sampleRateResolver = SystemTapSampleRateResolver(reportedFormat: tapFormat)
         var ioProcID: AudioDeviceIOProcID?
         let createStatus = AudioDeviceCreateIOProcIDWithBlock(
@@ -233,6 +250,7 @@ final class SystemAudioCapture: @unchecked Sendable {
             self.ioProcID = ioProcID
             self.tapFormat = tapFormat
             self.accumulator = accumulator
+            self.captureGeneration = generation
             self.deliveredChunkCount = 0
         }
 
@@ -281,6 +299,7 @@ final class SystemAudioCapture: @unchecked Sendable {
     }
 
     private func deliver(chunk: PendingPCMChunk, format: AVAudioFormat?) {
+        guard stateLock.withLock({ chunk.generation == captureGeneration }) else { return }
         guard let format, let buffer = chunk.makePCMBuffer(format: format) else { return }
 
         deliveredChunkCount += 1
@@ -424,6 +443,7 @@ final class SystemAudioCapture: @unchecked Sendable {
         let aggregateDevice: AudioHardwareAggregateDevice?
         let ioProcID: AudioDeviceIOProcID?
         let format: AVAudioFormat?
+        let generation: UUID
     }
 
     enum CaptureError: LocalizedError {
@@ -459,7 +479,7 @@ final class SystemAudioCapture: @unchecked Sendable {
 private final class SystemTapSampleRateResolver {
     private static let minimumObservedRates = 3
     private static let maximumBufferedChunks = 6
-    private static let correctionThresholdRatio = 0.12
+    private static let correctionThresholdRatio = 0.05
     private static let canonicalRates: [Double] = [
         8_000,
         12_000,
@@ -592,6 +612,7 @@ private struct ResolvedDelivery {
 }
 
 private struct PendingPCMChunk: Sendable {
+    let generation: UUID
     let frameCount: Int
     let bufferData: [Data]
     let capturedAt: Date
@@ -628,6 +649,7 @@ private struct PendingPCMChunk: Sendable {
 }
 
 private final class PCMChunkAccumulator {
+    private let generation: UUID
     private let targetFrameCount: Int
     private let bytesPerFrame: Int
     private let bufferCount: Int
@@ -636,12 +658,13 @@ private final class PCMChunkAccumulator {
     private var accumulatedFrameCount = 0
     private var chunkCapturedAt: Date?
 
-    init(format: AVAudioFormat, targetFrameCount: Int) throws {
+    init(format: AVAudioFormat, targetFrameCount: Int, generation: UUID) throws {
         let streamDescription = format.streamDescription.pointee
         guard streamDescription.mBytesPerFrame > 0 else {
             throw SystemAudioCapture.CaptureError.invalidTapFormat
         }
 
+        self.generation = generation
         self.targetFrameCount = targetFrameCount
         self.bytesPerFrame = Int(streamDescription.mBytesPerFrame)
         self.bufferCount = format.isInterleaved ? 1 : Int(format.channelCount)
@@ -679,6 +702,7 @@ private final class PCMChunkAccumulator {
     func flush() -> PendingPCMChunk? {
         guard accumulatedFrameCount > 0, let chunkCapturedAt else { return nil }
         let chunk = PendingPCMChunk(
+            generation: generation,
             frameCount: accumulatedFrameCount,
             bufferData: bufferData,
             capturedAt: chunkCapturedAt

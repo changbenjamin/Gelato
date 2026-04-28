@@ -23,6 +23,12 @@ final class StreamingTranscriber: @unchecked Sendable {
         interleaved: false
     )!
 
+    private static let rateWarmupSeconds: TimeInterval = 3
+    private static let rateDivergenceThreshold = 0.05
+    private var rateTrackingStartDate: Date?
+    private var rateTrackingTotalFrames: Int64 = 0
+    private var effectiveSampleRate: Double?
+
     init(
         asrManager: AsrManager,
         vadManager: VadManager,
@@ -41,6 +47,37 @@ final class StreamingTranscriber: @unchecked Sendable {
         self.inputGain = inputGain
         self.onPartial = onPartial
         self.onFinal = onFinal
+    }
+
+    private func updateEffectiveSampleRate(with capturedBuffer: CapturedAudioBuffer) {
+        let frameLength = Int(capturedBuffer.buffer.frameLength)
+        guard frameLength > 0 else { return }
+
+        if rateTrackingStartDate == nil {
+            rateTrackingStartDate = capturedBuffer.capturedAt
+            rateTrackingTotalFrames = 0
+        }
+
+        rateTrackingTotalFrames += Int64(frameLength)
+
+        guard let startDate = rateTrackingStartDate else { return }
+        let elapsed = capturedBuffer.capturedAt.timeIntervalSince(startDate)
+        guard elapsed >= Self.rateWarmupSeconds else { return }
+
+        let measuredRate = Double(rateTrackingTotalFrames) / elapsed
+        guard measuredRate.isFinite, measuredRate >= 4_000, measuredRate <= 192_000 else { return }
+
+        let reportedRate = capturedBuffer.buffer.format.sampleRate
+        let divergence = abs(measuredRate - reportedRate) / max(reportedRate, 1)
+        guard divergence >= Self.rateDivergenceThreshold else { return }
+
+        if effectiveSampleRate == nil || abs((effectiveSampleRate ?? 0) - measuredRate) > 1 {
+            effectiveSampleRate = measuredRate
+            diagLog(
+                "[\(speaker.rawValue)] effective sample rate corrected " +
+                "\(reportedRate) -> \(measuredRate)"
+            )
+        }
     }
 
     /// Silero VAD expects chunks of 4096 samples (256ms at 16kHz).
@@ -68,6 +105,8 @@ final class StreamingTranscriber: @unchecked Sendable {
                 let fmt = buffer.format
                 diagLog("[\(speaker.rawValue)] buffer #\(bufferCount): frames=\(buffer.frameLength) sr=\(fmt.sampleRate) ch=\(fmt.channelCount) interleaved=\(fmt.isInterleaved) common=\(fmt.commonFormat.rawValue)")
             }
+
+            updateEffectiveSampleRate(with: capturedBuffer)
 
             guard let samples = extractSamples(buffer) else { continue }
 
@@ -209,9 +248,10 @@ final class StreamingTranscriber: @unchecked Sendable {
 
     private func monoFloatBuffer(from buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
         let sourceFormat = buffer.format
+        let correctedSampleRate = effectiveSampleRate ?? sourceFormat.sampleRate
         let monoFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
-            sampleRate: sourceFormat.sampleRate,
+            sampleRate: correctedSampleRate,
             channels: 1,
             interleaved: false
         )!

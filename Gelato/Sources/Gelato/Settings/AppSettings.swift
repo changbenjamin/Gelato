@@ -34,10 +34,11 @@ final class AppSettings {
         let env = EnvLoader.load()
         self.transcriptionLocale = defaults.string(forKey: "transcriptionLocale") ?? "en-US"
         let storedMode = defaults.string(forKey: "transcriptionMode") ?? ""
-        if storedMode == TranscriptionMode.legacyElevenLabsRawValue {
-            self.transcriptionMode = .openAIDiarize
+        if storedMode == TranscriptionMode.legacyElevenLabsRawValue
+            || storedMode == TranscriptionMode.legacyOpenAIDiarizeRawValue {
+            self.transcriptionMode = .openAICleanup
         } else {
-            self.transcriptionMode = TranscriptionMode(rawValue: storedMode) ?? .openAIDiarize
+            self.transcriptionMode = TranscriptionMode(rawValue: storedMode) ?? .openAICleanup
         }
         self.inputDeviceID = AudioDeviceID(defaults.integer(forKey: "inputDeviceID"))
         // Default to false so screenshots work unless the user explicitly opts in.
